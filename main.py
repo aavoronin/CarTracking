@@ -10,6 +10,7 @@ from collections import defaultdict, deque
 from datetime import timedelta
 from ultralytics import YOLO
 
+
 def normalize_path(path):
     # Convert Windows path to WSL-compatible path if needed
     if 'microsoft' in platform.uname().release.lower() and path.startswith('C:\\'):
@@ -30,46 +31,14 @@ def time_to_seconds(t):
     else:
         raise ValueError(f"Invalid time format: {t}")
 
-
-# Example usage:
-print(time_to_seconds('00:40'))  # → 40
-print(time_to_seconds('02:15'))  # → 135
-print(time_to_seconds('01:02:03'))  # → 3723
-
-
-def draw_boxes(frame, results, scale_x, scale_y, model):
-    counts = defaultdict(int)
-
-    for box in results.boxes:
-        cls_id = int(box.cls[0])
-        conf = float(box.conf[0])
-        label = model.names[cls_id]
-
-        if label not in allowed_classes or conf < detection_threshold:
-            continue
-
-        counts[label] += 1
-        x1, y1, x2, y2 = map(int, box.xyxy[0])
-
-        x1 = int(x1 * scale_x)
-        y1 = int(y1 * scale_y)
-        x2 = int(x2 * scale_x)
-        y2 = int(y2 * scale_y)
-
-        text = f"{label} {conf:.2f}"
-        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
-        cv2.putText(frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5, box_color, 1, cv2.LINE_AA)
-
-    x_offset, y_offset = 10, 20
-    for i, label in enumerate(allowed_classes):
-        summary = f"{label}: {counts[label]}"
-        y_pos = y_offset + i * 20
-        cv2.putText(frame, summary, (x_offset, y_pos), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6, box_color, 2, cv2.LINE_AA)
-
-    return frame
-
+def get_text_height():
+    (text_width, text_height), baseline = cv2.getTextSize(
+        text='W',
+        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+        fontScale=1.2,
+        thickness=2
+    )
+    return text_height + 2
 
 
 def run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color,
@@ -111,6 +80,8 @@ def run_detection(input_files, output_file, allowed_classes, detection_threshold
         video_start_time = time.time()
         last_report_time = video_start_time
 
+        text_height = get_text_height()
+
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -125,6 +96,8 @@ def run_detection(input_files, output_file, allowed_classes, detection_threshold
             scale_x = target_resolution[0] / detect_resolution[0]
             scale_y = target_resolution[1] / detect_resolution[1]
 
+            counts = defaultdict(int)
+
             for box in results.boxes:
                 cls_id = int(box.cls)
                 conf = float(box.conf)
@@ -133,6 +106,8 @@ def run_detection(input_files, output_file, allowed_classes, detection_threshold
                 class_name = model.names.get(cls_id, "unknown")
                 if conf < detection_threshold or class_name not in allowed_classes:
                     continue
+
+                counts[class_name] += 1
 
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                 # Scale boxes to match target_frame
@@ -163,14 +138,19 @@ def run_detection(input_files, output_file, allowed_classes, detection_threshold
                             prev_line_length = line_length
                             prev_i = i
 
-
                 # Draw current box
                 cv2.rectangle(target_frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
                 label = f"{class_name} {conf:.2f}"
                 if track_id is not None:
                     label = f"ID {track_id} | {label}"
                 cv2.putText(target_frame, label, (int(x1), int(y1) - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 1)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, box_color, 2)
+
+            x_offset, y_offset = 10, text_height
+            for i, label in enumerate(allowed_classes):
+                summary = f"{label}: {counts[label]}"
+                y_pos = y_offset + i * text_height
+                cv2.putText(target_frame, summary, (x_offset, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 1.2, box_color, 2)
 
             video_writer.write(target_frame)
             frame_count += 1
@@ -179,6 +159,9 @@ def run_detection(input_files, output_file, allowed_classes, detection_threshold
                 elapsed = timedelta(seconds=int(time.time() - video_start_time))
                 print(f"🕒 Processed {frame_count:6} frames | Elapsed time: {elapsed}")
                 last_report_time = time.time()
+
+            #if frame_count > 200:
+            #    break
 
         total_elapsed = timedelta(seconds=int(time.time() - video_start_time))
         print(f"✅ Finished {video_path}: {frame_count} frames in {total_elapsed}.")
@@ -240,7 +223,7 @@ if __name__ == "__main__":
     ]
     print(input_files)
 
-    output_file = r"C:\Kaggle\Video\Tracking\car_tracking2_5.mp4"
+    output_file = r"C:\Kaggle\Video\Tracking\car_tracking2_8.mp4"
     allowed_classes = ['car', 'truck', 'bus', 'person', 'bird', 'dog', 'cat']
     allowed_classes = ['car', 'truck', 'bus', 'motorcycle']
     detection_threshold = 0.1
