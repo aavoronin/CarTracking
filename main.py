@@ -21,8 +21,6 @@
 #!pip install lap>=0.5.12
 
 """
-
-
 import cv2
 import torch
 import os
@@ -141,6 +139,7 @@ def run_detection(input_files, output_file, allowed_classes, detection_threshold
 
             # Use tracking-aware model call
             results = model.track(detect_frame, persist=True, verbose=False)[0]
+            detect_frame = results.plot()
 
             target_frame = cv2.resize(frame, target_resolution)
             scale_x = target_resolution[0] / detect_resolution[0]
@@ -189,8 +188,8 @@ def run_detection(input_files, output_file, allowed_classes, detection_threshold
                             prev_i = i
 
                 # Draw current box
-                cv2.rectangle(target_frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
                 label = f"{class_name} {conf:.2f}"
+                cv2.rectangle(target_frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 1)
                 if track_id is not None:
                     label = f"ID {track_id} | {label}"
                 cv2.putText(target_frame, label, (int(x1), int(y1) - 5),
@@ -287,10 +286,10 @@ if __name__ == "__main__":
     detection_threshold = 0.1
     box_color = (0, 0, 255)
 
-    allowed_classes = ["bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"]
+    allowed_classes = ["cow", "horse", "zebra"]  # , "bird", "cat", "dog", "sheep", "elephant", "bear", "giraffe"]
     input_files = [
         # r"C:\recordings\Safari_Kenya_0001.mp4"
-        fr"C:\recordings\Safari_Kenya_{i:04}.mp4" for i in range(1, 4)
+        fr"C:\recordings\Safari_Kenya_{i:04}.mp4" for i in range(1, 2)
     ]
     output_file = r"C:\Kaggle\Video\Tracking\Safari_Kenya_2.mp4"
     run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color,
