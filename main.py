@@ -1,3 +1,28 @@
+"""
+# OpenCV for video and image processing
+#!pip install opencv-python
+
+# PyTorch for deep learning and GPU acceleration
+# Use the appropriate command from https://pytorch.org/get-started/locally/
+# Here's a general CPU-only install:
+#!pip install torch torchvision torchaudio
+
+# Ultralytics YOLOv8 for object detection
+#!pip install ultralytics
+
+#!pip uninstall moviepy -y
+#!pip install moviepy
+#!pip install imageio-ffmpeg
+
+#!pip install cucim
+#!pip install moviepy==1.0.3
+
+#import moviepy.editor as mp
+#!pip install lap>=0.5.12
+
+"""
+
+
 import cv2
 import torch
 import os
@@ -31,6 +56,7 @@ def time_to_seconds(t):
     else:
         raise ValueError(f"Invalid time format: {t}")
 
+
 def get_text_height():
     (text_width, text_height), baseline = cv2.getTextSize(
         text='W',
@@ -39,6 +65,25 @@ def get_text_height():
         thickness=2
     )
     return text_height + 2
+
+
+standard_resolutions = [
+    (256, 144, "144p (Low)"),
+    (426, 240, "240p (Low)"),
+    (640, 360, "360p (SD)"),
+    (854, 480, "480p (SD)"),
+    (1280, 720, "720p (HD)"),
+    (1366, 768, "WXGA (HD+)"),
+    (1600, 900, "900p (HD+)"),
+    (1920, 1080, "1080p (Full HD)"),
+    (2048, 1080, "2K (DCI)"),
+    (2560, 1440, "1440p (QHD)"),
+    (3200, 1800, "1800p (QHD+)"),
+    (3840, 2160, "2160p (4K UHD)"),
+    (4096, 2160, "4K (DCI)"),
+    (5120, 2880, "5K"),
+    (7680, 4320, "4320p (8K UHD)"),
+]
 
 
 def run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color,
@@ -160,7 +205,7 @@ def run_detection(input_files, output_file, allowed_classes, detection_threshold
                 print(f"🕒 Processed {frame_count:6} frames | Elapsed time: {elapsed}")
                 last_report_time = time.time()
 
-            #if frame_count > 200:
+            # if frame_count > 200:
             #    break
 
         total_elapsed = timedelta(seconds=int(time.time() - video_start_time))
@@ -174,7 +219,7 @@ def run_detection(input_files, output_file, allowed_classes, detection_threshold
         print("⚠️ No video was processed.")
 
 
-def post_process_video(input_file, intervals=None):
+def post_process_video(input_file, intervals=None, compression=3):
     """
     Extract specified time intervals from a video, concatenate, and save the result.
 
@@ -210,26 +255,97 @@ def post_process_video(input_file, intervals=None):
         final_clip = clip
 
     # Export the processed video
-    final_clip.write_videofile(output_file, codec='libx264', audio_codec='aac')
+    if compression == 1:
+        final_clip.write_videofile(output_file, codec='libx264', audio_codec='aac')
+    elif compression == 2:
+        final_clip.write_videofile(
+            output_file,
+            codec='libx265',  # H.265/HEVC: better compression than H.264
+            audio_codec='aac',
+            bitrate='0',  # Use constant rate factor (CRF) instead of fixed bitrate
+            ffmpeg_params=['-crf', '18',  # CRF 18: visually lossless for x265
+                           '-preset', 'slow']  # Slower = better compression efficiency
+        )
+    elif compression == 3:
+        final_clip.write_videofile(
+            output_file,
+            codec='libx265',  # Use more efficient HEVC codec
+            audio_codec='aac',  # Retain compressed but good audio
+            ffmpeg_params=['-crf', '0']  # CRF=0 is truly lossless
+        )
 
     print(f"✅ Video saved to: {output_file}")
 
 
 # === Example usage ===
 if __name__ == "__main__":
-    input_files = [
-        # fr"C:\recordings\CanadianInspectionLanes_{i:04}.mp4" for i in range(3, 30)
-        fr"C:\recordings\CanadianInspectionLanes_{i:04}.mp4" for i in range(5, 6)
-    ]
-    print(input_files)
-
-    output_file = r"C:\Kaggle\Video\Tracking\car_tracking2_8.mp4"
     allowed_classes = ['car', 'truck', 'bus', 'person', 'bird', 'dog', 'cat']
     allowed_classes = ['car', 'truck', 'bus', 'motorcycle']
     detection_threshold = 0.1
     box_color = (0, 0, 255)
 
-    run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color)
+    input_files = [
+        r"C:\recordings\4_Corners_Camera_Downtown_0013.mp4"
+    ]
+    output_file = r"C:\Kaggle\Video\Tracking\4_Corners_Camera_1.mp4"
+
+    run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color,
+                  detect_resolution=(1920, 1080),
+                  target_resolution=(1280, 720))
+    post_process_video(output_file, compression=1, intervals=[('00:20', '01:25')])
+
+    input_files = [
+        # r"C:\recordings\4_Corners_Camera_Downtown_0013.mp4"
+        fr"C:\recordings\CanadianInspectionLanes_{i:04}.mp4" for i in range(8, 25)
+    ]
+    output_file = r"C:\Kaggle\Video\Tracking\4_Corners_Camera_2.mp4"
+
+    # run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color,
+    #              detect_resolution=(1920, 1080),
+    #              target_resolution=(1280, 720))
+    # post_process_video(output_file, compression=1)
+
+    input_files = [r"C:\recordings\Moscow Cars 20250702.mp4"]
+    output_file = r"C:\Kaggle\Video\Tracking\MoscowCars_2.mp4"
+
+    # run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color)
+    # post_process_video(output_file, compression=1)
+
+    input_files = [
+        # fr"C:\recordings\CanadianInspectionLanes_{i:04}.mp4" for i in range(3, 30)
+        fr"C:\recordings\CanadianInspectionLanes_{i:04}.mp4" for i in range(5, 6)
+    ]
+
+    output_file = r"C:\Kaggle\Video\Tracking\car_tracking2_11.mp4"
+    allowed_classes = ['car', 'truck', 'bus', 'person', 'bird', 'dog', 'cat']
+    allowed_classes = ['car', 'truck', 'bus', 'motorcycle']
+    detection_threshold = 0.1
+    box_color = (0, 0, 255)
+
+    # run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color,
+    #              target_resolution = (1280, 720))
     # output_file = '/mnt/c/Kaggle/Video/Tracking/car_tracking2_4.mp4'
-    post_process_video(output_file)
-    # post_process_video(output_file, [('00:10', '00:20'), ('00:30', '00:40')])
+    # post_process_video(output_file,[('00:00', '00:59')], 3)
+    # post_process_video(output_file,[('00:00', '00:59')], 2)
+    # post_process_video(output_file,[('00:00', '00:30')], 2)
+
+    input_files = [
+        # fr"C:\recordings\CanadianInspectionLanes_{i:04}.mp4" for i in range(3, 30)
+        fr"C:\recordings\timessquare_{i:04}.mp4" for i in range(1, 6)
+    ]
+
+    output_file = r"C:\Kaggle\Video\Tracking\timessquare_1.mp4"
+    allowed_classes = ['car', 'truck', 'bus', 'person']
+    detection_threshold = 0.1
+    box_color = (0, 0, 255)
+
+    # run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color)
+    # post_process_video(output_file)
+
+    input_files = [
+        fr"C:\recordings\timessquare_{i:04}.mp4" for i in range(1, 2)
+    ]
+    output_file = r"C:\Kaggle\Video\Tracking\timessquare_2.mp4"
+    # run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color)
+    # post_process_video(output_file,[('00:00', '00:59')])
+
