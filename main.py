@@ -96,7 +96,8 @@ def run_detection(input_files, output_file, allowed_classes, detection_threshold
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"🚀 Using device: {device}")
 
-    model = YOLO("yolov8m.pt")
+    # model = YOLO("yolov8m.pt")
+    model = YOLO("yolov8x.pt")
     model.to(device)
 
     video_writer = None
@@ -132,7 +133,11 @@ def run_detection(input_files, output_file, allowed_classes, detection_threshold
             if not ret:
                 break
 
-            detect_frame = cv2.resize(frame, detect_resolution)
+            # Only resize if frame is not already the desired resolution
+            if frame.shape[1] != detect_resolution[0] or frame.shape[0] != detect_resolution[1]:
+                detect_frame = cv2.resize(frame, detect_resolution)
+            else:
+                detect_frame = frame
 
             # Use tracking-aware model call
             results = model.track(detect_frame, persist=True, verbose=False)[0]
@@ -279,20 +284,32 @@ def post_process_video(input_file, intervals=None, compression=3):
 
 # === Example usage ===
 if __name__ == "__main__":
-    allowed_classes = ['car', 'truck', 'bus', 'person', 'bird', 'dog', 'cat']
-    allowed_classes = ['car', 'truck', 'bus', 'motorcycle']
     detection_threshold = 0.1
     box_color = (0, 0, 255)
+
+    allowed_classes = ["bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"]
+    input_files = [
+        # r"C:\recordings\Safari_Kenya_0001.mp4"
+        fr"C:\recordings\Safari_Kenya_{i:04}.mp4" for i in range(1, 4)
+    ]
+    output_file = r"C:\Kaggle\Video\Tracking\Safari_Kenya_2.mp4"
+    run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color,
+                  detect_resolution=(1280, 720),
+                  target_resolution=(1280, 720))
+    post_process_video(output_file, compression=1, intervals=[('00:20', '01:25')])
+
+    allowed_classes = ['car', 'truck', 'bus', 'person', 'bird', 'dog', 'cat']
+    allowed_classes = ['car', 'truck', 'bus', 'motorcycle']
 
     input_files = [
         r"C:\recordings\4_Corners_Camera_Downtown_0013.mp4"
     ]
-    output_file = r"C:\Kaggle\Video\Tracking\4_Corners_Camera_2.mp4"
+    output_file = r"C:\Kaggle\Video\Tracking\4_Corners_Camera_3.mp4"
 
-    run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color,
-                  detect_resolution=(1920, 1080),
-                  target_resolution=(1280, 720))
-    post_process_video(output_file, compression=1, intervals=[('00:20', '01:25')])
+    # run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color,
+    #              detect_resolution=(1920, 1080),
+    #              target_resolution=(1280, 720))
+    # post_process_video(output_file, compression=1,intervals=[('00:20', '01:25')])
 
     input_files = [
         # r"C:\recordings\4_Corners_Camera_Downtown_0013.mp4"
