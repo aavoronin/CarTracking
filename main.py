@@ -287,7 +287,7 @@ if __name__ == "__main__":
     input_files = [
         r"C:\recordings\4_Corners_Camera_Downtown_0013.mp4"
     ]
-    output_file = r"C:\Kaggle\Video\Tracking\4_Corners_Camera_1.mp4"
+    output_file = r"C:\Kaggle\Video\Tracking\4_Corners_Camera_2.mp4"
 
     run_detection(input_files, output_file, allowed_classes, detection_threshold, box_color,
                   detect_resolution=(1920, 1080),

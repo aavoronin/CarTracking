@@ -1,0 +1,76 @@
+🔶 ULTRALYTICS YOLOv5 MODELS
+Model	Size	Parameters	Image Size	Speed (FPS)	Use Case
+yolov5n	Nano	~1.9M	640×640	Very fast	Edge, mobile devices
+yolov5s	Small	~7.2M	640×640	Fast	Real-time detection
+yolov5m	Medium	~21.2M	640×640	Moderate	Better accuracy, desktop
+yolov5l	Large	~46.5M	640×640	Slower	More accurate, more compute
+yolov5x	XLarge	~87.7M	640×640	Slowest	Highest accuracy, needs GPU
+
+👉 All are trained by default on 640×640 input, but they support resizing (e.g. 320, 1280) for inference.
+
+🔶 ULTRALYTICS YOLOv8 MODELS
+Model	Size	Params	Image Size	Speed	Notes
+yolov8n	Nano	~3.2M	640×640	⚡ Super fast	For edge/IoT/mobile devices
+yolov8s	Small	~11.2M	640×640	⚡ Fast	Lightweight desktop or Jetson
+yolov8m	Medium	~25.9M	640×640	🚀 Moderate	Good balance
+yolov8l	Large	~43.7M	640×640	🐢 Slower	Better accuracy
+yolov8x	XLarge	~68.2M	640×640	🐢🐢 Slowest	Most accurate, GPU recommended
+
+👉 All models are compatible with 640×640, but can be used with larger sizes like 1280×1280 at cost of speed.
+
+🔶 YOLOv6 (by Meituan)
+Model	Params	Image Size	Use Case
+yolov6-n	~4.3M	640×640	Mobile / real-time
+yolov6-s	~17M	640×640	Lightweight, fast
+yolov6-m	~36.8M	640×640	Mid-size
+yolov6-l	~51.5M	640×640	High accuracy, slower
+
+🔶 YOLOv7 FAMILY
+Model	Params	Image Size	Notes
+yolov7-tiny	~6M	416×416	Edge devices
+yolov7	~36M	640×640	Standard version
+yolov7x	~71M	640×640	Larger and more accurate
+yolov7-w6	~70M+	1280×1280	For high-res input, slower
+yolov7-e6	~97M+	1280×1280	Enhanced version
+yolov7-d6	~130M+	1280×1280	Deep model, highest accuracy
+
+🔶 YOLOX FAMILY
+Model	Params	Image Size	Notes
+yolox-nano	~0.91M	416×416	Very light, IoT
+yolox-tiny	~5.06M	416×416	Light + decent accuracy
+yolox-s	~9M	640×640	Fast and good for real-time
+yolox-m	~25M	640×640	Better accuracy, GPU needed
+yolox-l	~54M	640×640	Accurate but slower
+yolox-x	~99M	640×640	Best accuracy, most resources
+
+🔶 YOLO-NAS (by Deci.AI)
+Model	Params	Image Size	Notes
+yolo-nas-s	~4.5M	640×640	Small, real-time edge device
+yolo-nas-m	~20M	640×640	Medium - best tradeoff
+yolo-nas-l	~40M	640×640	Most accurate, slower
+
+⏱ These are faster and more accurate than YOLOv8 according to Deci’s benchmarks.
+
+🔶 PP-YOLO FAMILY (Baidu PaddlePaddle)
+Model	Params	Image Size	Notes
+PP-YOLO	~50M	608×608	PaddlePaddle framework
+PP-YOLOv2	~60M+	640×640	Enhanced with Deformable Convs
+PP-YOLOE-s/l/x	Varied	640×640	Large models with high accuracy
+
+📸 Image Sizes Summary:
+Class	Common Sizes
+Nano/Tiny	320×320, 416×416
+Small	416×416, 640×640
+Medium	640×640, 960×960
+Large/X-Large	640×640, 1280×1280
+
+💡 Note: Higher input sizes = better accuracy, but slower inference. Lower sizes = faster, but less accurate.
+
+✅ Choosing the Right Model
+Need	Suggested Model
+Fastest inference (mobile)	yolov8n, yolov5n, yolox-nano, yolo-nas-s
+Balance of speed/accuracy	yolov8m, yolov5m, yolo-nas-m, yolox-m
+Highest accuracy	yolov8x, yolov7x, yolo-nas-l, yolox-x
+For segmentation/tracking	yolov8 family only (supports these natively)
+
+Would you like a chart or table comparing FPS vs mAP for these models on real benchmarks (like COCO dataset)? I can prepare that too.
