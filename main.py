@@ -229,16 +229,28 @@ if __name__ == "__main__":
     detection_threshold = 0.1
     box_color = (0, 0, 255)
 
-    allowed_classes = ["cow", "horse", "zebra"]  # , "bird", "cat", "dog", "sheep", "elephant", "bear", "giraffe"]
+    allowed_classes = ['car', 'truck', 'bus', 'person', "dog", 'motorcycle']
     input_files = [
         # r"C:\recordings\Safari_Kenya_0001.mp4"
-        fr"C:\recordings\Safari_Kenya_{i:04}.mp4" for i in range(1, 2)
+        fr"C:\recordings\Tehachapi_Live_Train_Cams_{i:04}.mp4" for i in range(1, 21)
     ]
-    output_file = r"C:\Kaggle\Video\Tracking\Safari_Kenya_3.mp4"
+    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_2.mp4"
     processor.run_detection(input_files, output_file, allowed_classes, detection_threshold=detection_threshold, box_color=box_color,
                             detect_resolution=(1280, 720),
                             target_resolution=(1280, 720))
     processor.post_process_video(output_file, compression=1, intervals=[('00:20', '01:25')])
+
+
+    allowed_classes = ["cow", "horse", "zebra"]  # , "bird", "cat", "dog", "sheep", "elephant", "bear", "giraffe"]
+    input_files = [
+        # r"C:\recordings\Safari_Kenya_0001.mp4"
+        fr"C:\recordings\Safari_Kenya_{i:04}.mp4" for i in range(1, 3)
+    ]
+    #output_file = r"C:\Kaggle\Video\Tracking\Safari_Kenya_3.mp4"
+    #processor.run_detection(input_files, output_file, allowed_classes, detection_threshold=detection_threshold, box_color=box_color,
+    #                        detect_resolution=(1280, 720),
+    #                        target_resolution=(1280, 720))
+    #processor.post_process_video(output_file, compression=1, intervals=[('00:20', '01:25')])
 
     allowed_classes = ['car', 'truck', 'bus', 'person', 'bird', 'dog', 'cat']
     allowed_classes = ['car', 'truck', 'bus', 'motorcycle']
