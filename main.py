@@ -21,29 +21,6 @@
 #!pip install lap>=0.5.12
 
 """
-"""
-# OpenCV for video and image processing
-#!pip install opencv-python
-
-# PyTorch for deep learning and GPU acceleration
-# Use the appropriate command from https://pytorch.org/get-started/locally/
-# Here's a general CPU-only install:
-#!pip install torch torchvision torchaudio
-
-# Ultralytics YOLOv8 for object detection
-#!pip install ultralytics
-
-#!pip uninstall moviepy -y
-#!pip install moviepy
-#!pip install imageio-ffmpeg
-
-#!pip install cucim
-#!pip install moviepy==1.0.3
-
-#import moviepy.editor as mp
-#!pip install lap>=0.5.12
-
-"""
 import cv2
 import torch
 import os
@@ -147,14 +124,21 @@ class YeloVideoProcessor:
 
         return target_frame
 
+
     def run_detection(self, input_files, output_file, detection_threshold=0.3, box_color=(0, 255, 0),
                       detect_resolution=(3840, 2160), target_resolution=(1920, 1080)):
 
         input_files = [self.normalize_path(p) for p in input_files]
         output_file = self.normalize_path(output_file)
-        video_writer = None
         text_height = self.get_text_height()
 
+        # Store all detections across all input videos
+        all_detections = []  # List of (video_path, frame_index, detection_result)
+        video_frames_info = []  # List of (video_path, frame_idx) to help during second pass
+        video_fps = None
+
+        # === FIRST PASS ===
+        print("\n🚀 FIRST PASS: Running detection across all input videos...")
         for video_path in input_files:
             if not os.path.exists(video_path):
                 print(f"❌ File not found: {video_path}")
@@ -166,56 +150,105 @@ class YeloVideoProcessor:
                 continue
 
             fps = cap.get(cv2.CAP_PROP_FPS)
-            print(f"\n📂 Processing: {video_path} (fps: {fps})")
-            if video_writer is None:
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                video_writer = cv2.VideoWriter(output_file, fourcc, fps, target_resolution)
+            if video_fps is None:
+                video_fps = fps  # Use FPS from first valid video
+            print(f"\n🔍 Processing (detection only): {video_path} (fps: {fps})")
 
-            frame_count = 0
+            frame_idx = 0
             video_start_time = time.time()
             last_report_time = video_start_time
-
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
 
                 detect_frame = self.preprocess_frame(detect_resolution, frame)
-                all_results = []
+                frame_results = []
 
                 for model_entry in self.models:
                     model = model_entry['model']
                     classes = model_entry['classes']
-                    if frame_count == 0:
+                    if frame_idx == 0:
                         print(classes)
                     result = model.track(detect_frame, persist=True, verbose=False)[0]
-                    all_results.append({
+                    frame_results.append({
                         'model': model,
                         'result': result,
                         'allowed_classes': classes,
                         'threshold': detection_threshold
                     })
 
-                processed_frame = self.post_process_frame(frame, all_results,
-                                                          detect_resolution, target_resolution,
-                                                          text_height, box_color)
-                video_writer.write(processed_frame)
-                frame_count += 1
+                all_detections.append(frame_results)
+                video_frames_info.append((video_path, frame_idx))
+                frame_idx += 1
 
                 if time.time() - last_report_time >= 2:
                     elapsed = timedelta(seconds=int(time.time() - video_start_time))
-                    print(f"🕒 Processed {frame_count:6} frames | Elapsed time: {elapsed}")
+                    print(f"🕒 Processed {frame_idx:6} frames | Elapsed time: {elapsed}")
                     last_report_time = time.time()
 
             total_elapsed = timedelta(seconds=int(time.time() - video_start_time))
-            print(f"✅ Finished {video_path}: {frame_count} frames in {total_elapsed}.")
+            print(f"✅ Finished {video_path}: {frame_idx} frames in {total_elapsed}.")
+            cap.release()
+
+        # === SECOND PASS ===
+        print("\n✏️ SECOND PASS: Drawing results and writing final output...")
+        video_writer = None
+        detection_index = 0
+
+        video_start_time = time.time()
+        last_report_time = video_start_time
+        for video_path in input_files:
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                print(f"❌ Couldn't reopen: {video_path}")
+                continue
+
+            frame_idx = 0
+            print(f"\n🖼️ Processing video: {video_path}")
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                if detection_index >= len(all_detections):
+                    print(f"⚠️ No stored detection for frame {detection_index}")
+                    break
+
+                frame_detections = all_detections[detection_index]
+
+                processed_frame = self.post_process_frame(
+                    frame,
+                    frame_detections,
+                    detect_resolution,
+                    target_resolution,
+                    text_height,
+                    box_color
+                )
+
+                if video_writer is None:
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    video_writer = cv2.VideoWriter(output_file, fourcc, video_fps, target_resolution)
+
+                video_writer.write(processed_frame)
+                detection_index += 1
+                frame_idx += 1
+                if time.time() - last_report_time >= 2:
+                    elapsed = timedelta(seconds=int(time.time() - video_start_time))
+                    print(f"🕒 Processed {frame_idx:6} frames | Elapsed time: {elapsed}")
+                    last_report_time = time.time()
+
+            total_elapsed = timedelta(seconds=int(time.time() - video_start_time))
+            print(f"✅ Finished {video_path}: {frame_idx} frames in {total_elapsed}.")
+
             cap.release()
 
         if video_writer:
             video_writer.release()
-            print(f"✅ Final output saved to: {output_file}")
+            print(f"\n✅ Final output saved to: {output_file}")
         else:
-            print("⚠️ No video was processed.")
+            print("⚠️ No video frames were written.")
+
 
     def post_process_video(self, input_file, intervals=None, compression=3):
         base, ext = os.path.splitext(input_file)
@@ -250,13 +283,14 @@ class YeloVideoProcessor:
 
 # === Example usage ===
 if __name__ == "__main__":
+
     detection_threshold = 0.1
     box_color = (0, 0, 255)
 
     allowed_classes = ['car', 'truck', 'bus', 'person', "dog", 'motorcycle']
     model_classes = [
-        # {'model': "/mnt/c/Kaggle/models/rail_cars/yolov8n_railway_model_50epoch.pt", 'classes': ['railway-car']},
-        # {'model': "/mnt/c/Kaggle/models/rail_cars2/yolov8m_railway_model_200epoch.pt", 'classes': ['railway-car']},
+        #{'model': "/mnt/c/Kaggle/models/rail_cars/yolov8n_railway_model_50epoch.pt", 'classes': ['railway-car']},
+        #{'model': "/mnt/c/Kaggle/models/rail_cars2/yolov8m_railway_model_200epoch.pt", 'classes': ['railway-car']},
         {'model': "C:\Kaggle/models/rail_cars5/yolov8n_railway_model_100epoch.pt", 'classes': ['railcar']},
         {'model': "yolov8x.pt", 'classes': ['car', 'truck', 'bus', 'person', "dog", 'motorcycle']},
     ]
@@ -267,11 +301,11 @@ if __name__ == "__main__":
         # r"C:\recordings\Safari_Kenya_0001.mp4"
         fr"C:\recordings\Tehachapi_Live_Train_Cams_{i:04}.mp4" for i in range(14, 16)
     ]
-    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_7.mp4"
+    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_6.mp4"
     processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
                             detect_resolution=(1280, 720),
                             target_resolution=(1280, 720))
     processor.post_process_video(output_file, compression=1)
-    # processor.post_process_video(output_file, compression=1, intervals=[('00:20', '01:25')])
+    #processor.post_process_video(output_file, compression=1, intervals=[('00:20', '01:25')])
 
 
