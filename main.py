@@ -35,7 +35,6 @@ from ultralytics import YOLO
 from scipy.signal import savgol_filter
 import numpy as np
 
-
 class YeloVideoProcessor:
     def __init__(self, model_classes, n_history=200):
         self.model_classes = model_classes
@@ -85,50 +84,6 @@ class YeloVideoProcessor:
                 prev_line_length = line_length
                 prev_i = i
 
-    def post_process_frame(self, frame, results, detect_resolution, target_resolution, text_height, box_color):
-        target_frame = cv2.resize(frame, target_resolution)
-        scale_x = target_resolution[0] / detect_resolution[0]
-        scale_y = target_resolution[1] / detect_resolution[1]
-        total_counts = defaultdict(int)
-
-        for model_idx, result_obj in enumerate(results):
-            model = result_obj['model']
-            result = result_obj['result']
-            allowed_classes = result_obj['allowed_classes']
-            id_offset = (model_idx + 1) * 1_000_000  # offset for model-based ID disambiguation
-
-            for box in result.boxes:
-                cls_id = int(box.cls)
-                conf = float(box.conf)
-                raw_track_id = int(box.id) if box.id is not None else None
-                track_id = raw_track_id + id_offset if raw_track_id is not None else None
-                class_name = model.names.get(cls_id, "unknown")
-
-                if conf < result_obj.get('threshold', 0.3) or class_name not in allowed_classes:
-                    continue
-
-                total_counts[class_name] += 1
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
-                x1 *= scale_x
-                y1 *= scale_y
-                x2 *= scale_x
-                y2 *= scale_y
-
-                if track_id is not None:
-                    self.track_histories[track_id].append((x1, y1, x2, y2))
-                    self._draw_track_history(target_frame, self.track_histories[track_id], box_color)
-
-                label = f"ID {track_id} | {class_name} {conf:.2f}" if track_id is not None else f"{class_name} {conf:.2f}"
-                cv2.rectangle(target_frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 1)
-                cv2.putText(target_frame, label, (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.8, box_color, 2)
-
-        for i, label in enumerate(sorted(total_counts.keys())):
-            y_pos = 10 + (i + 1) * text_height
-            cv2.putText(target_frame, f"{label}: {total_counts[label]}", (10, y_pos),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, box_color, 2)
-
-        return target_frame
-
     def determine_object_validity(self, track_id, detection_index, all_detections, model_idx,
                               screen_size):
 
@@ -162,18 +117,47 @@ class YeloVideoProcessor:
                 bboxes.append((cx, cy))
         return bboxes
 
-    def draw_data_on_frame(self, box_color, frame, valid_records, all_detections, frame_detections, detection_index):
+    def draw_data_on_frame(self, box_color, frame, valid_records, all_detections, frame_detections,
+                       detection_index, crossing_lines, crossing_stats):
+
+        self.draw_crossing_lines(frame, crossing_lines, box_color)
+
+        # === Draw object bounding boxes and labels ===
         for rec in valid_records:
-            x1, y1, x2, y2 = rec['bbox']
-            conf = rec['conf']
             x1, y1, x2, y2 = rec['bbox_smooth']
             conf = rec['conf_smooth']
             label = f"ID {rec['track_id']} | {rec['class_name']} {conf:.2f}"
             model_idx = rec['model_idx']
             track_id = rec['track_id']
+
             bboxes = self.collect_bboxes(all_detections, detection_index, model_idx, track_id)
             cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
             cv2.putText(frame, label, (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2)
+
+        # === Draw crossing statistics in upper-right corner ===
+        h, w = frame.shape[:2]
+        x_base = int(w * 0.8)   # Start 1/5 left from the right edge
+        y_base = 30             # Initial vertical offset
+        line_height = 25        # Space between lines
+
+        # Get stats for current frame
+        if detection_index < len(crossing_stats):
+            frame_stats = crossing_stats[detection_index]
+            for line_name, class_counts in frame_stats.items():
+                for class_name, count in class_counts.items():
+                    stat_text = f"{line_name}--{class_name}: {count}"
+                    cv2.putText(
+                        frame,
+                        stat_text,
+                        (x_base, y_base),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        box_color,
+                        2,
+                        cv2.LINE_AA
+                    )
+                    y_base += line_height
+
 
     def process_detections(self, all_detections):
         # Set to keep track of already processed track_ids
@@ -331,8 +315,145 @@ class YeloVideoProcessor:
             rec['max_f'] = max_f
 
 
+    from collections import defaultdict
+
+    def collect_crossing_stats(self, all_detections, crossing_lines):
+        def unique_key(rec):
+            return (rec['track_id'], rec['model_idx'], rec['class_name'])
+
+        def bbox_center(bbox):
+            x1, y1, x2, y2 = bbox
+            return ((x1 + x2) / 2, (y1 + y2) / 2)
+
+        def point_side_of_line(px, py, x1, y1, x2, y2):
+            return (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1)
+
+        def normalize(v):
+            norm = np.linalg.norm(v)
+            return v / norm if norm > 0 else v
+
+        def fit_motion_vector(points):
+            if len(points) < 2:
+                return None
+            return normalize(np.array([points[-1][0] - points[0][0], points[-1][1] - points[0][1]]))
+
+        def line_direction(x1, y1, x2, y2):
+            return normalize(np.array([x2 - x1, y2 - y1]))
+
+        def dot(a, b):
+            return np.dot(a, b)
+
+        # --- Preparation ---
+        max_frame_index = max(rec['frame_index'] for frame in all_detections for rec in frame)
+        object_tracks = defaultdict(list)
+        for frame_dets in all_detections:
+            for rec in frame_dets:
+                object_tracks[unique_key(rec)].append(rec)
+
+        # For frame-by-frame stats
+        per_frame_stats = []
+        already_counted = set()
+
+        for current_frame in range(max_frame_index + 1):
+            frame_stats = defaultdict(lambda: defaultdict(int))  # line_name -> class_name -> count
+
+            for obj_id, track in object_tracks.items():
+                if obj_id in already_counted:
+                    continue
+
+                # Filter past detections up to current frame
+                past_track = [r for r in track if r['frame_index'] <= current_frame]
+                if len(past_track) < 10:
+                    continue
+
+                past_track = sorted(past_track, key=lambda r: r['frame_index'])
+                centers = [bbox_center(r['bbox_smooth']) for r in past_track]
+
+                for line_name, (lx1, ly1, lx2, ly2) in crossing_lines.items():
+                    left, right = 0, 0
+                    for cx, cy in centers:
+                        side = point_side_of_line(cx, cy, lx1, ly1, lx2, ly2)
+                        if side < 0:
+                            left += 1
+                        elif side > 0:
+                            right += 1
+
+                    if left < 3 or right < 3:
+                        continue
+
+                    motion_vector = fit_motion_vector(centers)
+                    if motion_vector is None:
+                        continue
+
+                    line_vec = line_direction(lx1, ly1, lx2, ly2)
+                    if dot(motion_vector, line_vec) <= 0:
+                        continue
+
+                    # Valid crossing
+                    class_name = obj_id[2]
+                    frame_stats[line_name][class_name] += 1
+                    already_counted.add(obj_id)
+                    break  # only one line per object
+
+            # Combine current frame stats with previous frame's totals
+            if per_frame_stats:
+                prev_stats = per_frame_stats[-1]
+                combined_stats = defaultdict(lambda: defaultdict(int))
+                for line in crossing_lines:
+                    for cls in prev_stats[line]:
+                        combined_stats[line][cls] = prev_stats[line][cls]
+                for line in frame_stats:
+                    for cls in frame_stats[line]:
+                        combined_stats[line][cls] += frame_stats[line][cls]
+                per_frame_stats.append(combined_stats)
+            else:
+                per_frame_stats.append(frame_stats)
+
+        return per_frame_stats
+
+
+
+    def draw_crossing_lines(self, frame, crossing_lines, color):
+        for direction, coords in crossing_lines.items():
+            x1, y1, x2, y2 = coords
+
+            # Draw dotted line: interpolate points between (x1, y1) and (x2, y2)
+            num_dots = 30
+            for i in range(num_dots):
+                alpha = i / num_dots
+                beta = (i + 0.5) / num_dots
+
+                px1 = int(x1 * (1 - alpha) + x2 * alpha)
+                py1 = int(y1 * (1 - alpha) + y2 * alpha)
+                px2 = int(x1 * (1 - beta) + x2 * beta)
+                py2 = int(y1 * (1 - beta) + y2 * beta)
+
+                cv2.line(frame, (px1, py1), (px2, py2), color, 1)
+
+            # Draw arrowhead
+            cv2.arrowedLine(frame, (x1, y1), (x2, y2), color, 2, tipLength=0.03)
+
+            # Compute label position at 75% from start to end (1/4 from the end)
+            alpha = 0.75
+            label_x = int(x1 * (1 - alpha) + x2 * alpha)
+            label_y = int(y1 * (1 - alpha) + y2 * alpha)
+
+            # Draw direction label
+            cv2.putText(
+                frame,
+                direction,
+                (label_x, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                color,
+                2,
+                cv2.LINE_AA
+            )
+
+
     def run_detection(self, input_files, output_file, detection_threshold=0.3, box_color=(0, 255, 0),
-                  detect_resolution=(1280, 720), target_resolution=(1280, 720)):
+                  detect_resolution=(1280, 720), target_resolution=(1280, 720), crossing_lines = dict(),
+                      limit_on_frames=9999999):
 
         input_files = [self.normalize_path(p) for p in input_files]
         output_file = self.normalize_path(output_file)
@@ -364,7 +485,7 @@ class YeloVideoProcessor:
 
             while True:
                 ret, frame = cap.read()
-                if not ret:
+                if not ret or frame_index > limit_on_frames:
                     break
 
                 detect_frame = self.preprocess_frame(detect_resolution, frame)
@@ -373,7 +494,6 @@ class YeloVideoProcessor:
                 for model_idx, model_entry in enumerate(self.models):
                     model = model_entry['model']
                     classes = model_entry['classes']
-                    #model_name = os.path.basename(model_entry['model'].weights.name)
                     result = model.track(detect_frame, persist=True, verbose=False)[0]
 
                     for box in result.boxes:
@@ -412,11 +532,13 @@ class YeloVideoProcessor:
 
             total_elapsed = timedelta(seconds=int(time.time() - video_start_time))
             print(f"✅ Finished {video_path}: {frame_index} frames in {total_elapsed}.")
-
             cap.release()
-            print(f"✅ Finished processing: {video_path}")
+            if frame_index > limit_on_frames:
+                break
 
         all_detections = self.process_detections(all_detections)
+        crossing_stats = self.collect_crossing_stats(all_detections, crossing_lines)
+        #print(crossing_stats[50:54])
 
         # === SECOND PASS ===
         print("\n✏️ SECOND PASS: Drawing and writing final output...")
@@ -431,7 +553,7 @@ class YeloVideoProcessor:
 
             while True:
                 ret, frame = cap.read()
-                if not ret or detection_index >= len(all_detections):
+                if not ret or detection_index >= len(all_detections) or frame_index > limit_on_frames:
                     break
 
                 valid_records = []
@@ -449,7 +571,8 @@ class YeloVideoProcessor:
 
                 # Draw detections
                 frame = cv2.resize(frame, target_resolution)
-                self.draw_data_on_frame(box_color, frame, valid_records, all_detections, frame_detections, detection_index)
+                self.draw_data_on_frame(box_color, frame, valid_records, all_detections,
+                                        frame_detections, detection_index, crossing_lines, crossing_stats)
 
                 if video_writer is None:
                     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -467,6 +590,9 @@ class YeloVideoProcessor:
             total_elapsed = timedelta(seconds=int(time.time() - video_start_time))
             print(f"✅ Finished {video_path}: {frame_index} frames in {total_elapsed}.")
             cap.release()
+
+            if frame_index > limit_on_frames:
+                break
 
         if video_writer:
             video_writer.release()
@@ -526,11 +652,16 @@ if __name__ == "__main__":
         # r"C:\recordings\Safari_Kenya_0001.mp4"
         fr"C:\recordings\Tehachapi_Live_Train_Cams_{i:04}.mp4" for i in range(14, 16)
     ]
-    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_14.mp4"
+    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_15.mp4"
+    tr=(1280, 720)
+    crossing_lines = { "right-to-left": [int(tr[0] * 0.6), 0, int(tr[0] * 0.9), tr[1] - 1],
+                       "left-to-right": [int(tr[0] * 0.85), tr[1] - 1, int(tr[0] * 0.55), 0] }
     processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
                             detect_resolution=(1280, 720),
-                            target_resolution=(1280, 720))
+                            target_resolution=tr,
+                            crossing_lines=crossing_lines, limit_on_frames = 500)
     processor.post_process_video(output_file, compression=1)
+
     '''
     input_files = [
         # r"C:\recordings\Safari_Kenya_0001.mp4"
