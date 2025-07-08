@@ -32,6 +32,8 @@ from moviepy import VideoFileClip
 from collections import defaultdict, deque
 from datetime import timedelta
 from ultralytics import YOLO
+from scipy.signal import savgol_filter
+import numpy as np
 
 
 class YeloVideoProcessor:
@@ -164,6 +166,8 @@ class YeloVideoProcessor:
         for rec in valid_records:
             x1, y1, x2, y2 = rec['bbox']
             conf = rec['conf']
+            x1, y1, x2, y2 = rec['bbox_smooth']
+            conf = rec['conf_smooth']
             label = f"ID {rec['track_id']} | {rec['class_name']} {conf:.2f}"
             model_idx = rec['model_idx']
             track_id = rec['track_id']
@@ -172,18 +176,27 @@ class YeloVideoProcessor:
             cv2.putText(frame, label, (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2)
 
     def process_detections(self, all_detections):
+        # Set to keep track of already processed track_ids
         used = set()
+
+        # Initialize a new list of detections, one sublist per frame
         new_all_detections = [[] for _ in all_detections]
+
+        # Iterate over all detections in each frame
         for detections in all_detections:
             for rec in detections:
                 track_id = rec['track_id']
+
+                # Skip if this track_id has already been processed
                 if track_id in used:
                     continue
                 used.add(track_id)
+
+                # Extract identifiers for filtering
                 class_name = rec['class_name']
                 model_idx = rec['model_idx']
 
-                # Collect all records for this track_id
+                # Collect all records with the same track_id, class, and model
                 all_track_id_records = [
                     r for dets in all_detections for r in dets
                     if r['track_id'] == track_id and
@@ -191,39 +204,53 @@ class YeloVideoProcessor:
                        r['model_idx'] == model_idx
                 ]
 
-                # Sort by frame_index
+                # Sort these records by frame index
                 all_track_id_records.sort(key=lambda r: r['frame_index'])
 
+                # Skip if no records found
                 if not all_track_id_records:
                     continue
 
-                # Get frame index range
+                # Determine the full range of frame indices this track_id appears in
                 frame_indices = [r['frame_index'] for r in all_track_id_records]
                 min_f, max_f = min(frame_indices), max(frame_indices)
 
-                # Create a map from frame_index to record
+                # Build a quick lookup of frame_index -> record
                 frame_map = {r['frame_index']: r for r in all_track_id_records}
 
-                # Fill in missing frames by interpolation
-                filled_records = []
+                # Interpolate missing records between min and max frame_index
                 for f in range(min_f, max_f + 1):
                     if f in frame_map:
-                        #filled_records.append(frame_map[f])
+                        # If frame already exists, add the original record
                         new_all_detections[f].append(frame_map[f])
                     else:
-                        # Interpolate: find nearest frames before and after
-                        before = max((r for r in all_track_id_records if r['frame_index'] < f), key=lambda r: r['frame_index'], default=None)
-                        after = min((r for r in all_track_id_records if r['frame_index'] > f), key=lambda r: r['frame_index'], default=None)
+                        # Find nearest records before and after the missing frame
+                        before = max(
+                            (r for r in all_track_id_records if r['frame_index'] < f),
+                            key=lambda r: r['frame_index'],
+                            default=None
+                        )
+                        after = min(
+                            (r for r in all_track_id_records if r['frame_index'] > f),
+                            key=lambda r: r['frame_index'],
+                            default=None
+                        )
 
+                        # Only interpolate if both before and after records exist
                         if before and after:
+                            # Compute interpolation weight
                             alpha = (f - before['frame_index']) / (after['frame_index'] - before['frame_index'])
 
+                            # Linearly interpolate bbox values
                             interp_bbox = [
                                 before['bbox'][i] + alpha * (after['bbox'][i] - before['bbox'][i])
                                 for i in range(4)
                             ]
+
+                            # Linearly interpolate confidence value
                             interp_conf = before['conf'] + alpha * (after['conf'] - before['conf'])
 
+                            # Create a new interpolated record
                             filled_record = {
                                 'track_id': track_id,
                                 'model_idx': model_idx,
@@ -233,21 +260,76 @@ class YeloVideoProcessor:
                                 'conf': interp_conf
                             }
 
-                            #filled_records.append(filled_record)
+                            # Append the interpolated record to the correct frame
                             new_all_detections[f].append(filled_record)
+                            frame_map[f] = filled_record
 
+                self.create_smooth_detections(min_f, max_f, frame_map)
 
-                # Optionally: replace original records or merge
-                # For example, you might want to append to all_detections[f]
-                #for rec in filled_records:
-                #    frame_idx = rec['frame_index']
-                #    while len(all_detections) <= frame_idx:
-                #        all_detections.append([])
-                #    all_detections[frame_idx].append(rec)
+                # Debug output showing the number of frames this track covers
+                print(f"track_id {track_id}: {max_f - min_f + 1} total frames ({min_f} to {max_f})")
 
-                print(f"track_id {track_id}: {max_f - min_f} total frames ({min_f} to {max_f})")
-
+        # Return the updated list of detections, with interpolated entries
         return new_all_detections
+
+
+    def create_smooth_detections(self, min_f, max_f, frame_map):
+        total_frames = max_f - min_f + 1
+
+        # If too few frames, skip smoothing – just copy original values
+        if total_frames < 4:
+            for f in range(min_f, max_f + 1):
+                rec = frame_map[f]
+                rec['bbox_smooth'] = rec['bbox']
+                rec['conf_smooth'] = rec['conf']
+                rec['frame_map'] = frame_map
+                rec['min_f'] = min_f
+                rec['max_f'] = max_f
+            return
+
+        # Extract bbox and conf series
+        x1_list, y1_list, x2_list, y2_list, conf_list = [], [], [], [], []
+        frame_order = []
+
+        for f in range(min_f, max_f + 1):
+            rec = frame_map[f]
+            x1, y1, x2, y2 = rec['bbox']
+            conf = rec['conf']
+            x1_list.append(x1)
+            y1_list.append(y1)
+            x2_list.append(x2)
+            y2_list.append(y2)
+            conf_list.append(conf)
+            frame_order.append(f)
+
+        # Convert to NumPy arrays
+        x1_np = np.array(x1_list)
+        y1_np = np.array(y1_list)
+        x2_np = np.array(x2_list)
+        y2_np = np.array(y2_list)
+        conf_np = np.array(conf_list)
+
+        # Choose window size (must be odd and <= total_frames)
+        window = min(7, total_frames if total_frames % 2 == 1 else total_frames - 1)
+        if window < 3:
+            window = 3  # minimum size for savgol_filter
+
+        # Apply smoothing filter
+        x1_smooth = savgol_filter(x1_np, window_length=window, polyorder=2)
+        y1_smooth = savgol_filter(y1_np, window_length=window, polyorder=2)
+        x2_smooth = savgol_filter(x2_np, window_length=window, polyorder=2)
+        y2_smooth = savgol_filter(y2_np, window_length=window, polyorder=2)
+        conf_smooth = savgol_filter(conf_np, window_length=window, polyorder=2)
+
+        # Assign smoothed values back to records
+        for i, f in enumerate(frame_order):
+            rec = frame_map[f]
+            rec['bbox_smooth'] = [x1_smooth[i], y1_smooth[i], x2_smooth[i], y2_smooth[i]]
+            rec['conf_smooth'] = float(conf_smooth[i])
+            rec['frame_map'] = frame_map
+            rec['min_f'] = min_f
+            rec['max_f'] = max_f
+
 
     def run_detection(self, input_files, output_file, detection_threshold=0.3, box_color=(0, 255, 0),
                   detect_resolution=(1280, 720), target_resolution=(1280, 720)):
@@ -444,12 +526,12 @@ if __name__ == "__main__":
         # r"C:\recordings\Safari_Kenya_0001.mp4"
         fr"C:\recordings\Tehachapi_Live_Train_Cams_{i:04}.mp4" for i in range(14, 16)
     ]
-    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_12.mp4"
+    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_14.mp4"
     processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
                             detect_resolution=(1280, 720),
                             target_resolution=(1280, 720))
     processor.post_process_video(output_file, compression=1)
-
+    '''
     input_files = [
         # r"C:\recordings\Safari_Kenya_0001.mp4"
         fr"C:\recordings\Tehachapi_Live_Train_Cams3_{i:04}.mp4" for i in range(1, 13)
@@ -460,5 +542,5 @@ if __name__ == "__main__":
                             target_resolution=(1280, 720))
     processor.post_process_video(output_file, compression=1)
     #processor.post_process_video(output_file, compression=1, intervals=[('00:20', '01:25')])
-
+    '''
 
