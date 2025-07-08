@@ -160,14 +160,94 @@ class YeloVideoProcessor:
                 bboxes.append((cx, cy))
         return bboxes
 
-    def draw_data_on_frame(self, box_color, frame, valid_records, frame_detections):
+    def draw_data_on_frame(self, box_color, frame, valid_records, all_detections, frame_detections, detection_index):
         for rec in valid_records:
             x1, y1, x2, y2 = rec['bbox']
             conf = rec['conf']
             label = f"ID {rec['track_id']} | {rec['class_name']} {conf:.2f}"
+            model_idx = rec['model_idx']
+            track_id = rec['track_id']
+            bboxes = self.collect_bboxes(all_detections, detection_index, model_idx, track_id)
             cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
             cv2.putText(frame, label, (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2)
 
+    def process_detections(self, all_detections):
+        used = set()
+        new_all_detections = [[] for _ in all_detections]
+        for detections in all_detections:
+            for rec in detections:
+                track_id = rec['track_id']
+                if track_id in used:
+                    continue
+                used.add(track_id)
+                class_name = rec['class_name']
+                model_idx = rec['model_idx']
+
+                # Collect all records for this track_id
+                all_track_id_records = [
+                    r for dets in all_detections for r in dets
+                    if r['track_id'] == track_id and
+                       r['class_name'] == class_name and
+                       r['model_idx'] == model_idx
+                ]
+
+                # Sort by frame_index
+                all_track_id_records.sort(key=lambda r: r['frame_index'])
+
+                if not all_track_id_records:
+                    continue
+
+                # Get frame index range
+                frame_indices = [r['frame_index'] for r in all_track_id_records]
+                min_f, max_f = min(frame_indices), max(frame_indices)
+
+                # Create a map from frame_index to record
+                frame_map = {r['frame_index']: r for r in all_track_id_records}
+
+                # Fill in missing frames by interpolation
+                filled_records = []
+                for f in range(min_f, max_f + 1):
+                    if f in frame_map:
+                        #filled_records.append(frame_map[f])
+                        new_all_detections[f].append(frame_map[f])
+                    else:
+                        # Interpolate: find nearest frames before and after
+                        before = max((r for r in all_track_id_records if r['frame_index'] < f), key=lambda r: r['frame_index'], default=None)
+                        after = min((r for r in all_track_id_records if r['frame_index'] > f), key=lambda r: r['frame_index'], default=None)
+
+                        if before and after:
+                            alpha = (f - before['frame_index']) / (after['frame_index'] - before['frame_index'])
+
+                            interp_bbox = [
+                                before['bbox'][i] + alpha * (after['bbox'][i] - before['bbox'][i])
+                                for i in range(4)
+                            ]
+                            interp_conf = before['conf'] + alpha * (after['conf'] - before['conf'])
+
+                            filled_record = {
+                                'track_id': track_id,
+                                'model_idx': model_idx,
+                                'class_name': class_name,
+                                'frame_index': f,
+                                'bbox': interp_bbox,
+                                'conf': interp_conf
+                            }
+
+                            #filled_records.append(filled_record)
+                            new_all_detections[f].append(filled_record)
+
+
+                # Optionally: replace original records or merge
+                # For example, you might want to append to all_detections[f]
+                #for rec in filled_records:
+                #    frame_idx = rec['frame_index']
+                #    while len(all_detections) <= frame_idx:
+                #        all_detections.append([])
+                #    all_detections[frame_idx].append(rec)
+
+                print(f"track_id {track_id}: {max_f - min_f} total frames ({min_f} to {max_f})")
+
+        return new_all_detections
 
     def run_detection(self, input_files, output_file, detection_threshold=0.3, box_color=(0, 255, 0),
                   detect_resolution=(1280, 720), target_resolution=(1280, 720)):
@@ -229,7 +309,7 @@ class YeloVideoProcessor:
                         if box.conf is None:
                             continue
 
-                        conf = box.conf
+                        conf = float(box.conf)
 
                         detections_this_frame.append({
                             'frame_index': frame_index,
@@ -253,6 +333,8 @@ class YeloVideoProcessor:
 
             cap.release()
             print(f"✅ Finished processing: {video_path}")
+
+        all_detections = self.process_detections(all_detections)
 
         # === SECOND PASS ===
         print("\n✏️ SECOND PASS: Drawing and writing final output...")
@@ -285,7 +367,7 @@ class YeloVideoProcessor:
 
                 # Draw detections
                 frame = cv2.resize(frame, target_resolution)
-                self.draw_data_on_frame(box_color, frame, valid_records, frame_detections)
+                self.draw_data_on_frame(box_color, frame, valid_records, all_detections, frame_detections, detection_index)
 
                 if video_writer is None:
                     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -352,8 +434,8 @@ if __name__ == "__main__":
     model_classes = [
         #{'model': "/mnt/c/Kaggle/models/rail_cars/yolov8n_railway_model_50epoch.pt", 'classes': ['railway-car']},
         #{'model': "/mnt/c/Kaggle/models/rail_cars2/yolov8m_railway_model_200epoch.pt", 'classes': ['railway-car']},
-        {'model': "C:\Kaggle/models/rail_cars5/yolov8n_railway_model_100epoch.pt", 'classes': ['railcar']},
-        {'model': "yolov8x.pt", 'classes': ['car', 'truck', 'bus', 'person', "dog", 'motorcycle']},
+        {'model': "C:\Kaggle/models/rail_cars6/yolov8m_railway_model_50epoch.pt", 'classes': ['railcar']},
+        {'model': "yolov8m.pt", 'classes': ['car', 'truck', 'bus', 'person', "dog", 'motorcycle']},
     ]
 
     processor = YeloVideoProcessor(model_classes)
@@ -362,7 +444,17 @@ if __name__ == "__main__":
         # r"C:\recordings\Safari_Kenya_0001.mp4"
         fr"C:\recordings\Tehachapi_Live_Train_Cams_{i:04}.mp4" for i in range(14, 16)
     ]
-    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_9.mp4"
+    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_12.mp4"
+    processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
+                            detect_resolution=(1280, 720),
+                            target_resolution=(1280, 720))
+    processor.post_process_video(output_file, compression=1)
+
+    input_files = [
+        # r"C:\recordings\Safari_Kenya_0001.mp4"
+        fr"C:\recordings\Tehachapi_Live_Train_Cams3_{i:04}.mp4" for i in range(1, 13)
+    ]
+    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_13.mp4"
     processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
                             detect_resolution=(1280, 720),
                             target_resolution=(1280, 720))
