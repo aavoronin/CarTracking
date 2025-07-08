@@ -124,8 +124,8 @@ class YeloVideoProcessor:
 
         return target_frame
 
-    def determine_object_validity(self, track_id, detection_index, all_detections, model_idx, screen_size,
-                                  frames_back=100, frames_forward=120, min_bboxes=10):
+    def determine_object_validity(self, track_id, detection_index, all_detections, model_idx,
+                              screen_size, frames_back=100, frames_forward=120, min_bboxes=10):
         bboxes = []
 
         start = max(0, detection_index - frames_back)
@@ -133,18 +133,16 @@ class YeloVideoProcessor:
 
         for i in range(start, end):
             frame_detections = all_detections[i]
-            for result_obj in frame_detections:
-                if result_obj['model_idx'] != model_idx:
+            for record in frame_detections:
+                if record['model_idx'] != model_idx:
+                    continue
+                if record['track_id'] != track_id:
                     continue
 
-                id_offset = (model_idx + 1) * 1_000_000
-                for box in result_obj['result'].boxes:
-                    box_id = int(box.id) + id_offset if box.id is not None else None
-                    if box_id == track_id:
-                        x1, y1, x2, y2 = box.xyxy[0].tolist()
-                        cx = (x1 + x2) / 2
-                        cy = (y1 + y2) / 2
-                        bboxes.append((cx, cy))
+                x1, y1, x2, y2 = record['bbox']
+                cx = (x1 + x2) / 2
+                cy = (y1 + y2) / 2
+                bboxes.append((cx, cy))
 
         if len(bboxes) < min_bboxes:
             return False
@@ -152,22 +150,26 @@ class YeloVideoProcessor:
         dx = bboxes[-1][0] - bboxes[0][0]
         dy = bboxes[-1][1] - bboxes[0][1]
         movement = math.hypot(dx, dy)
-
         screen_diagonal = math.hypot(*screen_size)
+
         return movement >= (screen_diagonal / 8)
 
+
     def run_detection(self, input_files, output_file, detection_threshold=0.3, box_color=(0, 255, 0),
-                      detect_resolution=(3840, 2160), target_resolution=(1920, 1080)):
+                  detect_resolution=(1280, 720), target_resolution=(1280, 720)):
 
         input_files = [self.normalize_path(p) for p in input_files]
         output_file = self.normalize_path(output_file)
         text_height = self.get_text_height()
 
-        all_detections = []  # [(frame_results), ...]
-        video_frames_info = []  # [(video_path, frame_idx), ...]
+        all_detections = []  # list of lists of DetectionRecords
         video_fps = None
+        frame_index = 0
+        frame_idx = 0
+        video_start_time = time.time()
+        last_report_time = video_start_time
 
-        print("\n🚀 FIRST PASS: Running detection across all input videos...")
+        print("\n🚀 FIRST PASS: Running detection...")
         for video_path in input_files:
             if not os.path.exists(video_path):
                 print(f"❌ File not found: {video_path}")
@@ -182,10 +184,7 @@ class YeloVideoProcessor:
             if video_fps is None:
                 video_fps = fps
 
-            print(f"\n🔍 Processing (detection only): {video_path} (fps: {fps})")
-            frame_idx = 0
-            video_start_time = time.time()
-            last_report_time = video_start_time
+            print(f"🔍 Processing: {video_path} (fps: {fps})")
 
             while True:
                 ret, frame = cap.read()
@@ -193,118 +192,109 @@ class YeloVideoProcessor:
                     break
 
                 detect_frame = self.preprocess_frame(detect_resolution, frame)
-                frame_results = []
+                detections_this_frame = []
 
                 for model_idx, model_entry in enumerate(self.models):
                     model = model_entry['model']
                     classes = model_entry['classes']
+                    #model_name = os.path.basename(model_entry['model'].weights.name)
                     result = model.track(detect_frame, persist=True, verbose=False)[0]
-                    frame_results.append({
-                        'model': model,
-                        'result': result,
-                        'allowed_classes': classes,
-                        'threshold': detection_threshold,
-                        'model_idx': model_idx
-                    })
-                    for bbox in result.boxes[0]:
-                        print(int(bbox.id))
 
-                all_detections.append(frame_results)
-                video_frames_info.append((video_path, frame_idx))
-                frame_idx += 1
+                    for box in result.boxes:
+                        if box.id is None:
+                            continue
+                        cls_id = int(box.cls)
+                        class_name = model.names.get(cls_id, "unknown")
+                        if class_name not in classes:
+                            continue
+                        if float(box.conf) < detection_threshold:
+                            continue
+
+                        x1, y1, x2, y2 = box.xyxy[0].tolist()
+                        track_id = int(box.id) + (model_idx + 1) * 1_000_000
+
+                        detections_this_frame.append({
+                            'frame_index': frame_index,
+                            'track_id': track_id,
+                            'model_idx': model_idx,
+                            #'model_name': model_name,
+                            'class_name': class_name,
+                            'bbox': (x1, y1, x2, y2)
+                        })
+
+                all_detections.append(detections_this_frame)
+                frame_index += 1
 
                 if time.time() - last_report_time >= 2:
                     elapsed = timedelta(seconds=int(time.time() - video_start_time))
-                    print(f"🕒 Processed {frame_idx:6} frames | Elapsed time: {elapsed}")
+                    print(f"🕒 Processed {frame_index:6} frames | Elapsed time: {elapsed}")
                     last_report_time = time.time()
 
-            cap.release()
             total_elapsed = timedelta(seconds=int(time.time() - video_start_time))
-            print(f"✅ Finished {video_path}: {frame_idx} frames in {total_elapsed}.")
+            print(f"✅ Finished {video_path}: {frame_index} frames in {total_elapsed}.")
 
-        print("\n✏️ SECOND PASS: Drawing results and writing final output...")
+            cap.release()
+            print(f"✅ Finished processing: {video_path}")
+
+        # === SECOND PASS ===
+        print("\n✏️ SECOND PASS: Drawing and writing final output...")
         video_writer = None
         detection_index = 0
-        video_start_time = time.time()
-        last_report_time = video_start_time
+        frame_index = 0
 
         for video_path in input_files:
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
-                print(f"❌ Couldn't reopen: {video_path}")
                 continue
 
-            frame_idx = 0
-            print(f"\n🖼️ Processing video: {video_path}")
             while True:
                 ret, frame = cap.read()
                 if not ret or detection_index >= len(all_detections):
                     break
 
+                valid_records = []
+                screen_size = target_resolution
                 frame_detections = all_detections[detection_index]
-                valid_detections = []
 
-                for result_obj in frame_detections:
-                    result = result_obj['result']
-                    model_idx = result_obj['model_idx']
-                    allowed_classes = result_obj['allowed_classes']
-                    id_offset = (model_idx + 1) * 1_000_000
+                for record in frame_detections:
+                    if self.determine_object_validity(
+                            track_id=record['track_id'],
+                            detection_index=detection_index,
+                            all_detections=all_detections,
+                            model_idx=record['model_idx'],
+                            screen_size=screen_size):
+                        valid_records.append(record)
 
-                    valid_boxes = []
-                    for box in result.boxes:
-                        cls_id = int(box.cls)
-                        class_name = result_obj['model'].names.get(cls_id, "unknown")
-                        if class_name not in allowed_classes or float(box.conf) < detection_threshold:
-                            continue
-
-                        track_id = int(box.id) + id_offset if box.id is not None else None
-
-                        if track_id is not None and self.determine_object_validity(
-                                track_id=track_id,
-                                detection_index=detection_index,
-                                all_detections=all_detections,
-                                model_idx=model_idx,
-                                screen_size=target_resolution
-                        ):
-                            valid_boxes.append(box)
-
-                    if valid_boxes:
-                        # Create a shallow copy of result_obj with filtered boxes
-                        filtered_result_obj = result_obj.copy()
-                        filtered_result_obj['result'].boxes = valid_boxes
-                        valid_detections.append(filtered_result_obj)
-
-                processed_frame = self.post_process_frame(
-                    frame,
-                    valid_detections,
-                    detect_resolution,
-                    target_resolution,
-                    text_height,
-                    box_color
-                )
+                # Draw detections
+                frame = cv2.resize(frame, target_resolution)
+                for rec in valid_records:
+                    x1, y1, x2, y2 = rec['bbox']
+                    label = f"ID {rec['track_id']} | {rec['class_name']}"
+                    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
+                    cv2.putText(frame, label, (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2)
 
                 if video_writer is None:
                     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                     video_writer = cv2.VideoWriter(output_file, fourcc, video_fps, target_resolution)
 
-                video_writer.write(processed_frame)
+                video_writer.write(frame)
                 detection_index += 1
-                frame_idx += 1
+                frame_index += 1
 
                 if time.time() - last_report_time >= 2:
                     elapsed = timedelta(seconds=int(time.time() - video_start_time))
-                    print(f"🕒 Processed {frame_idx:6} frames | Elapsed time: {elapsed}")
+                    print(f"🕒 Processed {frame_index:6} frames | Elapsed time: {elapsed}")
                     last_report_time = time.time()
 
-            cap.release()
             total_elapsed = timedelta(seconds=int(time.time() - video_start_time))
-            print(f"✅ Finished {video_path}: {frame_idx} frames in {total_elapsed}.")
+            print(f"✅ Finished {video_path}: {frame_index} frames in {total_elapsed}.")
+            cap.release()
 
         if video_writer:
             video_writer.release()
-            print(f"\n✅ Final output saved to: {output_file}")
+            print(f"\n✅ Output saved to: {output_file}")
         else:
-            print("⚠️ No video frames were written.")
+            print("⚠️ No video was written.")
 
     def post_process_video(self, input_file, intervals=None, compression=3):
         base, ext = os.path.splitext(input_file)
@@ -357,7 +347,7 @@ if __name__ == "__main__":
         # r"C:\recordings\Safari_Kenya_0001.mp4"
         fr"C:\recordings\Tehachapi_Live_Train_Cams_{i:04}.mp4" for i in range(14, 16)
     ]
-    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_8.mp4"
+    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_6.mp4"
     processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
                             detect_resolution=(1280, 720),
                             target_resolution=(1280, 720))
