@@ -136,7 +136,7 @@ class YeloVideoProcessor:
 
         # === Draw crossing statistics in upper-right corner ===
         h, w = frame.shape[:2]
-        x_base = int(w * 0.8)   # Start 1/5 left from the right edge
+        x_base = 30  # Initial horiz offset
         y_base = 30             # Initial vertical offset
         line_height = 25        # Space between lines
 
@@ -151,7 +151,7 @@ class YeloVideoProcessor:
                         stat_text,
                         (x_base, y_base),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
+                        0.9,
                         box_color,
                         2,
                         cv2.LINE_AA
@@ -315,8 +315,6 @@ class YeloVideoProcessor:
             rec['max_f'] = max_f
 
 
-    from collections import defaultdict
-
     def collect_crossing_stats(self, all_detections, crossing_lines):
         def unique_key(rec):
             return (rec['track_id'], rec['model_idx'], rec['class_name'])
@@ -408,10 +406,7 @@ class YeloVideoProcessor:
                 per_frame_stats.append(combined_stats)
             else:
                 per_frame_stats.append(frame_stats)
-
         return per_frame_stats
-
-
 
     def draw_crossing_lines(self, frame, crossing_lines, color):
         for direction, coords in crossing_lines.items():
@@ -431,13 +426,14 @@ class YeloVideoProcessor:
                 cv2.line(frame, (px1, py1), (px2, py2), color, 1)
 
             # Draw arrowhead
-            cv2.arrowedLine(frame, (x1, y1), (x2, y2), color, 2, tipLength=0.03)
+            cv2.arrowedLine(frame, (x1, y1), (x2, y2), color, 2, tipLength=0.02)
 
             # Compute label position at 75% from start to end (1/4 from the end)
             alpha = 0.75
             label_x = int(x1 * (1 - alpha) + x2 * alpha)
             label_y = int(y1 * (1 - alpha) + y2 * alpha)
 
+            """
             # Draw direction label
             cv2.putText(
                 frame,
@@ -449,6 +445,7 @@ class YeloVideoProcessor:
                 2,
                 cv2.LINE_AA
             )
+            """
 
 
     def run_detection(self, input_files, output_file, detection_threshold=0.3, box_color=(0, 255, 0),
@@ -649,18 +646,22 @@ if __name__ == "__main__":
     processor = YeloVideoProcessor(model_classes)
 
     input_files = [
-        # r"C:\recordings\Safari_Kenya_0001.mp4"
         fr"C:\recordings\Tehachapi_Live_Train_Cams_{i:04}.mp4" for i in range(14, 16)
     ]
-    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_15.mp4"
+    #+[
+    #    fr"C:\recordings\Tehachapi_Live_Train_Cams3_{i:04}.mp4" for i in range(25, 28)
+    #]
+    print(input_files)
+
+    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_16.mp4"
     tr=(1280, 720)
-    crossing_lines = { "right-to-left": [int(tr[0] * 0.6), 0, int(tr[0] * 0.9), tr[1] - 1],
-                       "left-to-right": [int(tr[0] * 0.85), tr[1] - 1, int(tr[0] * 0.55), 0] }
+    crossing_lines = { "right-to-left": [int(tr[0] * 0.75), 0, int(tr[0] * 0.6), tr[1] - 1],
+                       "left-to-right": [int(tr[0] * 0.65), tr[1] - 1, int(tr[0] * 0.80), 0] }
     processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
                             detect_resolution=(1280, 720),
                             target_resolution=tr,
-                            crossing_lines=crossing_lines, limit_on_frames = 500)
-    processor.post_process_video(output_file, compression=1)
+                            crossing_lines=crossing_lines, limit_on_frames=9999999)
+    processor.post_process_video(output_file, compression=1, intervals=[('00:25', '03:50')])
 
     '''
     input_files = [
@@ -672,6 +673,6 @@ if __name__ == "__main__":
                             detect_resolution=(1280, 720),
                             target_resolution=(1280, 720))
     processor.post_process_video(output_file, compression=1)
-    #processor.post_process_video(output_file, compression=1, intervals=[('00:20', '01:25')])
+    #processor.post_process_video(output_file, compression=1, intervals=[('00:25', '01:25')])
     '''
 
