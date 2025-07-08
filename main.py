@@ -43,6 +43,9 @@ class YeloVideoProcessor:
         self.models = []
         self.track_histories = defaultdict(lambda: deque(maxlen=n_history))
         self._load_models()
+        self.frames_back = 100
+        self.frames_forward = 120
+        self.min_bboxes = 10
 
     def normalize_path(self, path):
         if 'microsoft' in platform.uname().release.lower() and path.startswith('C:\\'):
@@ -125,12 +128,24 @@ class YeloVideoProcessor:
         return target_frame
 
     def determine_object_validity(self, track_id, detection_index, all_detections, model_idx,
-                              screen_size, frames_back=100, frames_forward=120, min_bboxes=10):
+                              screen_size):
+
+        bboxes = self.collect_bboxes(all_detections, detection_index, model_idx, track_id)
+
+        if len(bboxes) < self.min_bboxes:
+            return False
+
+        dx = bboxes[-1][0] - bboxes[0][0]
+        dy = bboxes[-1][1] - bboxes[0][1]
+        movement = math.hypot(dx, dy)
+        screen_diagonal = math.hypot(*screen_size)
+
+        return movement >= (screen_diagonal / 8)
+
+    def collect_bboxes(self, all_detections, detection_index, model_idx, track_id):
         bboxes = []
-
-        start = max(0, detection_index - frames_back)
-        end = min(len(all_detections), detection_index + frames_forward)
-
+        start = max(0, detection_index - self.frames_back)
+        end = min(len(all_detections), detection_index + self.frames_forward)
         for i in range(start, end):
             frame_detections = all_detections[i]
             for record in frame_detections:
@@ -143,16 +158,15 @@ class YeloVideoProcessor:
                 cx = (x1 + x2) / 2
                 cy = (y1 + y2) / 2
                 bboxes.append((cx, cy))
+        return bboxes
 
-        if len(bboxes) < min_bboxes:
-            return False
-
-        dx = bboxes[-1][0] - bboxes[0][0]
-        dy = bboxes[-1][1] - bboxes[0][1]
-        movement = math.hypot(dx, dy)
-        screen_diagonal = math.hypot(*screen_size)
-
-        return movement >= (screen_diagonal / 8)
+    def draw_data_on_frame(self, box_color, frame, valid_records, frame_detections):
+        for rec in valid_records:
+            x1, y1, x2, y2 = rec['bbox']
+            conf = rec['conf']
+            label = f"ID {rec['track_id']} | {rec['class_name']} {conf:.2f}"
+            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
+            cv2.putText(frame, label, (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2)
 
 
     def run_detection(self, input_files, output_file, detection_threshold=0.3, box_color=(0, 255, 0),
@@ -212,14 +226,18 @@ class YeloVideoProcessor:
 
                         x1, y1, x2, y2 = box.xyxy[0].tolist()
                         track_id = int(box.id) + (model_idx + 1) * 1_000_000
+                        if box.conf is None:
+                            continue
+
+                        conf = box.conf
 
                         detections_this_frame.append({
                             'frame_index': frame_index,
                             'track_id': track_id,
                             'model_idx': model_idx,
-                            #'model_name': model_name,
                             'class_name': class_name,
-                            'bbox': (x1, y1, x2, y2)
+                            'bbox': (x1, y1, x2, y2),
+                            "conf": conf,
                         })
 
                 all_detections.append(detections_this_frame)
@@ -267,11 +285,7 @@ class YeloVideoProcessor:
 
                 # Draw detections
                 frame = cv2.resize(frame, target_resolution)
-                for rec in valid_records:
-                    x1, y1, x2, y2 = rec['bbox']
-                    label = f"ID {rec['track_id']} | {rec['class_name']}"
-                    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
-                    cv2.putText(frame, label, (int(x1), int(y1) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2)
+                self.draw_data_on_frame(box_color, frame, valid_records, frame_detections)
 
                 if video_writer is None:
                     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -295,6 +309,7 @@ class YeloVideoProcessor:
             print(f"\n✅ Output saved to: {output_file}")
         else:
             print("⚠️ No video was written.")
+
 
     def post_process_video(self, input_file, intervals=None, compression=3):
         base, ext = os.path.splitext(input_file)
@@ -347,7 +362,7 @@ if __name__ == "__main__":
         # r"C:\recordings\Safari_Kenya_0001.mp4"
         fr"C:\recordings\Tehachapi_Live_Train_Cams_{i:04}.mp4" for i in range(14, 16)
     ]
-    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_6.mp4"
+    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_9.mp4"
     processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
                             detect_resolution=(1280, 720),
                             target_resolution=(1280, 720))
