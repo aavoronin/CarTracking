@@ -1,0 +1,46 @@
+Here are the expected value ranges for YOLO training metrics when the model is trained correctly (on a reasonably clean, annotated dataset):
+
+✅ Detection Metrics (on Validation Set)
+Metric	Good Range	Excellent	Notes
+metrics/precision(B)	0.70 – 0.90+	> 0.90	High = few false positives
+metrics/recall(B)	0.60 – 0.85+	> 0.85	High = few missed detections
+metrics/mAP50(B)	0.70 – 0.95+	> 0.90	Easier mAP (IoU ≥ 0.50)
+metrics/mAP50-95(B)	0.40 – 0.75+	> 0.60	Stricter COCO-style mAP (IoU 0.5–0.95); lower is expected
+
+🔸 If mAP50-95 is low while mAP50 is high → your model finds objects but isn’t localizing them well.
+
+📉 Loss Values
+Metric	Good Range (Final Epochs)	Notes
+train/box_loss	< 0.05 – 0.20	Lower = better localization
+train/cls_loss	< 0.01 – 0.10	Lower = better classification
+train/dfl_loss	< 0.01 – 0.10	YOLOv8: measures box regression quality (distribution focal)
+val/box_loss	Similar to train/box_loss	Should decrease and stabilize
+val/cls_loss	Similar to train/cls_loss
+val/dfl_loss	Similar to train/dfl_loss
+
+🔹 Loss should decrease and stabilize. A slightly higher val loss is normal due to generalization.
+
+⚙️ Learning Rates (lr/pg0, pg1, pg2)
+Metric	Typical Values	Notes
+lr/pg0	~1e-3 to 1e-5	Backbone learning rate
+lr/pg1	~1e-3 to 1e-5	Head layers learning rate
+lr/pg2	~1e-3 to 1e-5	Usually same as others unless customized
+
+These depend on learning rate scheduling. They should decay slowly over time.
+
+⚠️ Red Flags
+Symptom	Possible Issue
+mAP50 stays < 0.5	Model not learning; check labels, overfitting, poor augmentation
+Loss stays flat or increases	Wrong labels, poor anchors, bad LR
+High precision but low recall	Model is over-conservative (misses objects)
+
+🎯 Real-World Targets (well-trained models on clean data)
+mAP50: 0.85–0.95+
+
+mAP50-95: 0.55–0.75
+
+Precision: > 0.85
+
+Recall: > 0.80
+
+Losses: all < 0.1–0.2 by the end
