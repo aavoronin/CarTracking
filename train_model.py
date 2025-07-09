@@ -1,5 +1,3 @@
-# this is for notebook
-
 import os
 import shutil
 import torch
@@ -12,10 +10,40 @@ torch.cuda.ipc_collect()  # Releases inter-process memory
 torch.cuda.set_per_process_memory_fraction(0.6, device=0)
 
 # === Setup ===
-data_yaml_path = '/mnt/c/Kaggle/train_data/rail_cars/Railroad-Cars-6/data.yaml'
-target_model_dir = '/mnt/c/Kaggle/models/rail_cars7'
+data_yaml_path = '/mnt/c/Kaggle/train_data/rail_cars/Railroad-Cars-7/data.yaml'
+target_model_dir = '/mnt/c/Kaggle/models/rail_cars10'
 project_path = os.path.join(target_model_dir, 'runs/detect')
 os.makedirs(target_model_dir, exist_ok=True)
+
+from ultralytics.data.dataset import YOLODataset
+
+# Save original method
+_original_getitem = YOLODataset.__getitem__
+
+
+# Patch method to filter small boxes
+def _patched_getitem(self, index):
+    sample = _original_getitem(self, index)
+    if sample is None:
+        return None
+
+    bboxes = sample['bboxes']
+    cls = sample['cls']
+
+    # Filter out boxes smaller than min_wh (in pixels)
+    min_wh = 4  # Change this threshold as needed
+    keep = []
+    for i, (x1, y1, x2, y2) in enumerate(bboxes):
+        if (x2 - x1) >= min_wh and (y2 - y1) >= min_wh:
+            keep.append(i)
+
+    sample['bboxes'] = [bboxes[i] for i in keep]
+    sample['cls'] = [cls[i] for i in keep]
+    return sample
+
+
+# Apply patch
+YOLODataset.__getitem__ = _patched_getitem
 
 
 def plot_losses_from_csv(csv_path, run_name):
@@ -85,27 +113,35 @@ def plot_losses_from_csv(csv_path, run_name):
 
 
 # === Training Loop ===
-for epochs in [50]:
-    for model_path in ['yolov8n.pt',
-                       'yolov8m.pt'
-                       # , 'yolov8x.pt'
-                       ]:
+# for epochs in [10, 60, 130]:
+for model_path in [
+    'yolov8m.pt',
+    'yolov8s.pt',
+    'yolov8l.pt'
+]:
+    prev_model_path = None
+    pretrained_epochs = 0
+    for epochs in [50]:
         model_base = os.path.splitext(model_path)[0]
-        run_name = f"{model_base}_railway_model_{epochs}epoch"
+        run_name = f"{model_base}_railway_model_{epochs + pretrained_epochs}epoch"
         dest_best_path = os.path.join(target_model_dir, f"{run_name}.pt")
 
         if os.path.exists(dest_best_path):
+            prev_model_path = dest_best_path
+            pretrained_epochs += epochs
             continue
-
-        model = YOLO(model_path)
+        if prev_model_path:
+            model = YOLO(prev_model_path)
+        else:
+            model = YOLO(model_path)
 
         # === Run training ===
         model.train(
             data=data_yaml_path,  # Path to data YAML file (contains class names and train/val image dirs)
             epochs=epochs,  # Number of training epochs
             imgsz=640,  # Input image size (will be resized to 640x640 before training)
-            batch=2,  # Batch size (images per GPU during training)
-            workers=2 if model_path not in ['yolov8x.pt'] else 1,
+            batch=1,  # Batch size (images per GPU during training)
+            workers=2 if model_path not in ['yolov8l.pt', 'yolov8x.pt'] else 1,
             # Number of dataloader worker threads (reduce for large models)
             device=0,  # CUDA device ID to use (0 = first GPU)
 
@@ -115,16 +151,16 @@ for epochs in [50]:
             # --- Data Augmentation Parameters ---
             fliplr=0.5,  # Probability of horizontal flip (left/right)
             flipud=0.0,  # Probability of vertical flip (up/down)
-            hsv_h=0.015,  # HSV hue augmentation (fractional change)
-            hsv_s=0.7,  # HSV saturation augmentation
-            hsv_v=0.4,  # HSV value (brightness) augmentation
-            scale=0.5,  # Image scale range (zoom in/out)
+            hsv_h=0,  # 0.015,                 # HSV hue augmentation (fractional change)
+            hsv_s=0,  # 0.7,                   # HSV saturation augmentation
+            hsv_v=0,  # 0.4,                   # HSV value (brightness) augmentation
+            scale=0.8,  # Image scale range (zoom in/out)
             translate=0.1,  # Image translation as a fraction of image size
             shear=2.0,  # Shear angle in degrees
             perspective=0.0005,  # Perspective transform distortion
-            mosaic=0.8,  # Probability of using 4-image mosaic augmentation
-            mixup=0.1,  # Probability of using mixup (combining images)
-            degrees=6.0,  # Random rotation in degrees
+            mosaic=0,  # 0.8,                  # Probability of using 4-image mosaic augmentation
+            mixup=0,  # 0.1,                   # Probability of using mixup (combining images)
+            degrees=4.0,  # Random rotation in degrees
         )
 
         # === Parse training results from results.csv and plot ===
@@ -139,6 +175,7 @@ for epochs in [50]:
         if os.path.exists(source_best_path):
             shutil.copy(source_best_path, dest_best_path)
             print(f"✅ Model saved: {dest_best_path}")
+            prev_model_path = dest_best_path
         else:
             print(f"❌ best.pt not found: {source_best_path}")
 
