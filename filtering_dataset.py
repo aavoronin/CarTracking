@@ -4,7 +4,10 @@ from PIL import Image
 
 dataset_path = '/mnt/c/Kaggle/train_data/rail_cars/Railroad-Cars-8'
 filtered_path = dataset_path + '_filtered'
-min_size = 16  # minimum width/height in pixels
+
+FACTOR = 4.0
+MIN_WIDTH_NORM = 0.025 * FACTOR
+MIN_HEIGHT_NORM = 0.025 * FACTOR
 
 # Remove filtered_path folder if exists
 if os.path.exists(filtered_path):
@@ -56,10 +59,7 @@ def filter_labels_and_images(labels_dir, images_dir):
             cls, x_c, y_c, w, h = parts
             w, h = float(w), float(h)
 
-            w_px = w * w_img
-            h_px = h * h_img
-
-            if w_px >= min_size and h_px >= min_size:
+            if w >= MIN_WIDTH_NORM and h >= MIN_HEIGHT_NORM:
                 filtered_lines.append(line)
             else:
                 removed_boxes += 1
@@ -96,5 +96,3 @@ print("Filtering complete!")
 print("\nImages removed during filtering:")
 for img_name in removed_images:
     print(img_name)
-
-
