@@ -34,6 +34,9 @@ from datetime import timedelta
 from ultralytics import YOLO
 from scipy.signal import savgol_filter
 import numpy as np
+from sklearn.linear_model import LinearRegression
+from sklearn.decomposition import PCA
+
 
 class YeloVideoProcessor:
     def __init__(self, model_classes, n_history=200):
@@ -46,7 +49,7 @@ class YeloVideoProcessor:
         self._load_models()
         self.frames_back = 100
         self.frames_forward = 120
-        self.min_bboxes = 10
+        self.min_bboxes = 8
 
     def normalize_path(self, path):
         if 'microsoft' in platform.uname().release.lower() and path.startswith('C:\\'):
@@ -57,7 +60,9 @@ class YeloVideoProcessor:
         for entry in self.model_classes:
             model_path = entry['model']
             classes = set(entry['classes'])
-            model = YOLO(self.normalize_path(model_path)).to(self.device)
+            model_path = self.normalize_path(model_path)
+            print(f"✅ Loading model: {model_path}")
+            model = YOLO(model_path).to(self.device)
             self.models.append({'model': model, 'classes': classes})
             print(f"✅ Loaded model: {model_path} with classes: {classes}")
 
@@ -97,7 +102,7 @@ class YeloVideoProcessor:
         movement = math.hypot(dx, dy)
         screen_diagonal = math.hypot(*screen_size)
 
-        return movement >= (screen_diagonal / 8)
+        return movement >= (screen_diagonal / 10)
 
     def collect_bboxes(self, all_detections, detection_index, model_idx, track_id):
         bboxes = []
@@ -141,7 +146,7 @@ class YeloVideoProcessor:
         line_height = 25        # Space between lines
 
         # Get stats for current frame
-        if detection_index < len(crossing_stats):
+        if crossing_stats and detection_index < len(crossing_stats):
             frame_stats = crossing_stats[detection_index]
             for line_name, class_counts in frame_stats.items():
                 for class_name, count in class_counts.items():
@@ -158,8 +163,75 @@ class YeloVideoProcessor:
                     )
                     y_base += line_height
 
+    def process_detections(self, all_detections, crossing_lines):
+        def compute_section_averages(lst):
+            n = len(lst)
+            third = n // 3
 
-    def process_detections(self, all_detections):
+            first_third = lst[:third]
+            center_third = lst[third:2*third]
+            last_third = lst[2*third:]
+
+            avg_all = sum(lst) / n
+            avg_first = sum(first_third) / len(first_third)
+            avg_center = sum(center_third) / len(center_third)
+            avg_last = sum(last_third) / len(last_third)
+
+            return [avg_all, avg_first, avg_center, avg_last]
+
+        def bbox_centers_linearity_metric(frame_map):
+            """
+            Calculates a scale-invariant metric of how close bounding box centers
+            are to a straight line.
+
+            Args:
+                frame_map (dict): Dictionary with values containing 'bbox' key.
+                                  Each bbox is [x1, y1, x2, y2].
+
+            Returns:
+                float: normalized average perpendicular distance of bbox centers
+                       to best-fit line. Smaller means closer to a line.
+                       Returns 0 if not enough points.
+            """
+            centers = []
+            for record in frame_map.values():
+                bbox = record['bbox']
+                x1, y1, x2, y2 = bbox
+                cx = (x1 + x2) / 2
+                cy = (y1 + y2) / 2
+                centers.append([cx, cy])
+
+            centers = np.array(centers)
+            if len(centers) < 2:
+                # Not enough points to define a line
+                return 0.0
+
+            x = centers[:, 0]
+            y = centers[:, 1]
+
+            # Fit line y = mx + b
+            A = np.vstack([x, np.ones(len(x))]).T
+            m, b = np.linalg.lstsq(A, y, rcond=None)[0]
+
+            # Compute perpendicular distances
+            distances = np.abs(m*x - y + b) / np.sqrt(m**2 + 1)
+            avg_distance = distances.mean()
+
+            # Normalize by the range of the centers along the major axis (line direction)
+            # Calculate projection of points onto the line direction vector
+            direction = np.array([1, m])
+            direction = direction / np.linalg.norm(direction)  # unit vector
+
+            projections = centers @ direction  # dot product of each center with direction
+
+            range_proj = projections.max() - projections.min()
+            if range_proj == 0:
+                # Points are all at the same projection => no scale, consider perfect line
+                return 0.0
+
+            normalized_metric = avg_distance / range_proj
+            return normalized_metric
+
         # Set to keep track of already processed track_ids
         used = set()
 
@@ -241,7 +313,8 @@ class YeloVideoProcessor:
                                 'class_name': class_name,
                                 'frame_index': f,
                                 'bbox': interp_bbox,
-                                'conf': interp_conf
+                                'conf': interp_conf,
+                                'interpolated': True
                             }
 
                             # Append the interpolated record to the correct frame
@@ -251,7 +324,13 @@ class YeloVideoProcessor:
                 self.create_smooth_detections(min_f, max_f, frame_map)
 
                 # Debug output showing the number of frames this track covers
-                print(f"track_id {track_id}: {max_f - min_f + 1} total frames ({min_f} to {max_f})")
+                if len(frame_map) >= 10:
+                    interpolated_count = sum(1 for record in frame_map.values() if record.get('interpolated'))
+                    aka_line = bbox_centers_linearity_metric(frame_map)
+                    avs = compute_section_averages([frame_map[k].get('conf') for k in frame_map.keys()])
+                    print(f"track_id {track_id}: {max_f - min_f + 1} total frames ({min_f} to {max_f}) inter: {interpolated_count} " + \
+                          f"{interpolated_count/(max_f - min_f + 1):.3f} aka_line: {aka_line:.3f} {avs[0]:.2f} " + \
+                          f"{avs[1]:.2f} {avs[2]:.2f} {avs[3]:.2f}")
 
         # Return the updated list of detections, with interpolated entries
         return new_all_detections
@@ -330,16 +409,49 @@ class YeloVideoProcessor:
             norm = np.linalg.norm(v)
             return v / norm if norm > 0 else v
 
-        def fit_motion_vector(points):
+        def compute_motion_vector(points, linearity_threshold=0.95):
             if len(points) < 2:
                 return None
-            return normalize(np.array([points[-1][0] - points[0][0], points[-1][1] - points[0][1]]))
+
+            data = np.array(points)
+
+            # Center the data
+            centered = data - np.mean(data, axis=0)
+
+            # Run PCA
+            pca = PCA(n_components=2)
+            pca.fit(centered)
+
+            # Check how linear the motion is (first PC must explain most variance)
+            if pca.explained_variance_ratio_[0] < linearity_threshold:
+                return None
+
+            # Dominant direction (unit vector)
+            direction = pca.components_[0]
+
+            # Project data onto direction and compute total spread (motion magnitude)
+            projections = centered @ direction
+            magnitude = projections.max() - projections.min()
+
+            # Final motion vector
+            motion_vector = direction * magnitude
+            #print(motion_vector)
+            return motion_vector.tolist()
+
+
+        def fit_motion_vector_normalized(direction):
+            if direction is None:
+                return None
+            return normalize(direction)
 
         def line_direction(x1, y1, x2, y2):
             return normalize(np.array([x2 - x1, y2 - y1]))
 
         def dot(a, b):
             return np.dot(a, b)
+
+        if len(all_detections) == 0:
+            return None
 
         # --- Preparation ---
         max_frame_index = max(rec['frame_index'] for frame in all_detections for rec in frame)
@@ -361,7 +473,7 @@ class YeloVideoProcessor:
 
                 # Filter past detections up to current frame
                 past_track = [r for r in track if r['frame_index'] <= current_frame]
-                if len(past_track) < 10:
+                if len(past_track) < self.min_bboxes:
                     continue
 
                 past_track = sorted(past_track, key=lambda r: r['frame_index'])
@@ -379,13 +491,20 @@ class YeloVideoProcessor:
                     if left < 3 or right < 3:
                         continue
 
-                    motion_vector = fit_motion_vector(centers)
-                    if motion_vector is None:
+                    line_vec = line_direction(lx1, ly1, lx2, ly2)
+
+                    motion_vector = compute_motion_vector(centers)
+                    motion_vector_norm = fit_motion_vector_normalized(motion_vector)
+                    if motion_vector_norm is None:
                         continue
 
-                    line_vec = line_direction(lx1, ly1, lx2, ly2)
-                    if dot(motion_vector, line_vec) <= 0:
+                    dot_product = dot(motion_vector_norm, line_vec)
+                    if dot_product <= 0:
                         continue
+
+                    vector_len = math.hypot(motion_vector[0], motion_vector[0])
+                    print(f"{track[0].get('track_id')} crossed '{line_name}' " +
+                          f"(dot_product: {dot_product:.3f}) vector_len: {vector_len:.3f}")
 
                     # Valid crossing
                     class_name = obj_id[2]
@@ -533,7 +652,7 @@ class YeloVideoProcessor:
             if frame_index > limit_on_frames:
                 break
 
-        all_detections = self.process_detections(all_detections)
+        all_detections = self.process_detections(all_detections, crossing_lines)
         crossing_stats = self.collect_crossing_stats(all_detections, crossing_lines)
         #print(crossing_stats[50:54])
 
@@ -639,29 +758,76 @@ if __name__ == "__main__":
     model_classes = [
         #{'model': "/mnt/c/Kaggle/models/rail_cars/yolov8n_railway_model_50epoch.pt", 'classes': ['railway-car']},
         #{'model': "/mnt/c/Kaggle/models/rail_cars2/yolov8m_railway_model_200epoch.pt", 'classes': ['railway-car']},
-        {'model': "C:\Kaggle/models/rail_cars6/yolov8m_railway_model_50epoch.pt", 'classes': ['railcar']},
-        {'model': "yolov8m.pt", 'classes': ['car', 'truck', 'bus', 'person', "dog", 'motorcycle']},
+        #{'model': "C:\Kaggle/models/rail_cars8/yolov8s_railway_model_50epoch.pt", 'classes': ['railcar']},
+        #{'model': "C:\Kaggle/models/rail_cars7/yolov8m_railway_model_50epoch.pt", 'classes': ['railcar']},
+        #{'model': "C:\Kaggle/models/rail_cars10/yolov8s_railway_model_50epoch.pt", 'classes': ['railcar']},
+        #{'model': "C:\Kaggle/models/rail_cars11/best.pt", 'classes': ['railcar']},
+        {'model': "C:\Kaggle/models/rail_cars12/yolov8m_railway_model_150epoch.pt", 'classes': ['railcar']},
+        {'model': "yolov8x.pt", 'classes': ['car', 'truck', 'bus', 'person', "dog", 'motorcycle']},
     ]
 
     processor = YeloVideoProcessor(model_classes)
 
-    input_files = [
-        fr"C:\recordings\Tehachapi_Live_Train_Cams_{i:04}.mp4" for i in range(14, 16)
-    ]
-    #+[
-    #    fr"C:\recordings\Tehachapi_Live_Train_Cams3_{i:04}.mp4" for i in range(25, 28)
-    #]
-    print(input_files)
-
-    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_16.mp4"
     tr=(1280, 720)
-    crossing_lines = { "right-to-left": [int(tr[0] * 0.75), 0, int(tr[0] * 0.6), tr[1] - 1],
-                       "left-to-right": [int(tr[0] * 0.65), tr[1] - 1, int(tr[0] * 0.80), 0] }
+
+    input_files = [
+        fr"C:\recordings\Glendale_Static_Ohio_{i:04}.mp4" for i in range(1, 6)
+    ]
+    output_file = r"C:\Kaggle\Video\Tracking\Glendale_Static_Ohio_9.mp4"
+    tr=(1280, 720)
+    crossing_lines = { "left-to-right": [int(tr[0] * 0.42), 0, int(tr[0] * 0.37), tr[1] - 1],
+                       "right-to-left": [int(tr[0] * 0.35), tr[1] - 1, int(tr[0] * 0.40), 0] }
+
+    processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
+                            detect_resolution=(1280, 720),
+                            target_resolution=(1280, 720),
+                            crossing_lines=crossing_lines, limit_on_frames=700)
+    processor.post_process_video(output_file, compression=1)
+
+
+    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_32.mp4"
+    input_files = [
+        fr"C:\recordings\Tehachapi_Live_Train_Cams3_{i:04}.mp4" for i in range(14, 16)
+    ]
     processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
                             detect_resolution=(1280, 720),
                             target_resolution=tr,
-                            crossing_lines=crossing_lines, limit_on_frames=9999999)
-    processor.post_process_video(output_file, compression=1, intervals=[('00:25', '03:50')])
+                            crossing_lines=crossing_lines, limit_on_frames=1000000)
+    processor.post_process_video(output_file, compression=1) #, intervals=[('00:25', '03:50')
+
+    crossing_lines = { "right-to-left": [int(tr[0] * 0.75), 0, int(tr[0] * 0.70), tr[1] - 1],
+                       "left-to-right": [int(tr[0] * 0.75), tr[1] - 1, int(tr[0] * 0.80), 0] }
+    crossing_lines = { "right-to-left": [int(tr[0] * 0.55), 0, int(tr[0] * 0.50), tr[1] - 1],
+                       "left-to-right": [int(tr[0] * 0.55), tr[1] - 1, int(tr[0] * 0.60), 0] }
+
+    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_33.mp4"
+    input_files = [
+        fr"C:\recordings\Tehachapi_Live_Train_Cams_{i:04}.mp4" for i in range(14, 16)
+    ]
+
+    processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
+                            detect_resolution=(1280, 720),
+                            target_resolution=tr,
+                            crossing_lines=crossing_lines, limit_on_frames=1000)
+    processor.post_process_video(output_file, compression=1) #, intervals=[('00:25', '03:50')
+
+    output_file = r"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_34.mp4"
+    input_files = [
+        fr"C:\recordings\Tehachapi_Live_Train_Cams4_{i:04}.mp4" for i in range(1, 3)
+    ]+[
+        fr"C:\recordings\Tehachapi_Live_Train_Cams3_{i:04}.mp4" for i in range(1, 3)
+    ]+[
+        fr"C:\recordings\Tehachapi_Live_Train_Cams3_{i:04}.mp4" for i in range(33, 36)
+    ]+[
+        fr"C:\recordings\Tehachapi_Live_Train_Cams5_{i:04}.mp4" for i in range(1, 5)
+    ]
+
+    processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
+                            detect_resolution=(1280, 720),
+                            target_resolution=tr,
+                            crossing_lines=crossing_lines, limit_on_frames=10000000)
+    processor.post_process_video(output_file, compression=1) #, intervals=[('00:25', '03:50')
+
 
     '''
     input_files = [
