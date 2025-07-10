@@ -8,9 +8,10 @@ from roboflow import Roboflow
 robo_flow_public_api_key = '*****'
 robo_flow_private_api_key = '******'
 
+
 torch.cuda.set_per_process_memory_fraction(0.4, device=0)
 
-for version in range(6, 7):
+for version in range(9, 10):
     try:
         # Download using Roboflow (default location)
         rf = Roboflow(api_key=robo_flow_private_api_key)
