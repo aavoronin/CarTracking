@@ -4,15 +4,16 @@ import random
 import numpy as np
 import cv2
 from PIL import Image
+import matplotlib.pyplot as plt
 
 # ========== CONFIGURATION ==========
-dataset_path = '/mnt/c/Kaggle/train_data/rail_cars/Railroad-Cars-9'
+dataset_path = '/mnt/c/Kaggle/train_data/rail_cars/Railroad-Cars-10'
 filtered_path = dataset_path + '_filtered'
 fixtures_path = '/mnt/c/Kaggle/train_data/rail_cars/railroad-posts'
 
 image_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')
 
-FACTOR = 4.0
+FACTOR = 2.0
 MIN_WIDTH_NORM = 0.025 * FACTOR
 MIN_HEIGHT_NORM = 0.025 * FACTOR
 
@@ -20,8 +21,14 @@ MIN_WIDTH_RATIO = 1 / 32
 MAX_WIDTH_RATIO = 1 / 6
 MIN_HEIGHT_RATIO = 1 / 16
 MAX_HEIGHT_RATIO = 1 / 3
-N_NOISE_IMAGES = 20
-NOISE_COPIES_PER_IMAGE = 2
+N_NOISE_IMAGES = 8
+NOISE_COPIES_PER_IMAGE = 1
+GAUSS_NOISE_PROBABILITY = 0.5
+GAUSS_NOISE_STD_MIN = 5
+GAUSS_NOISE_STD_MAX = 30
+MAX_IMAGES_TO_PLOT = 40
+ENLARGE_SCALE = 6
+
 
 # ========== FUNCTIONS ==========
 def filter_labels_and_images(labels_dir, images_dir):
@@ -45,6 +52,7 @@ def filter_labels_and_images(labels_dir, images_dir):
 
         with Image.open(image_file) as im:
             w_img, h_img = im.size
+            image_aspect_ratio = w_img / h_img
 
         with open(label_path, 'r') as f:
             lines = f.readlines()
@@ -53,15 +61,18 @@ def filter_labels_and_images(labels_dir, images_dir):
         filtered_lines = []
         removed_boxes = 0
 
+        bboxes = []  # Store normalized bboxes for analysis
+
         for line in lines:
             parts = line.strip().split()
             if len(parts) != 5:
                 continue
             cls, x_c, y_c, w, h = parts
-            w, h = float(w), float(h)
+            x_c, y_c, w, h = map(float, [x_c, y_c, w, h])
 
             if w >= MIN_WIDTH_NORM and h >= MIN_HEIGHT_NORM:
                 filtered_lines.append(line)
+                bboxes.append((x_c, y_c, w, h))
             else:
                 removed_boxes += 1
 
@@ -77,8 +88,46 @@ def filter_labels_and_images(labels_dir, images_dir):
         else:
             with open(label_path, 'w') as f:
                 f.writelines(filtered_lines)
-            print(f"Processed image: {os.path.basename(image_file)} - boxes found: {total_boxes}, boxes removed: {removed_boxes}")
+
+            # ---- Compute bbox stats ----
+            norm_aspect_ratios = []
+            lefts, rights, tops, bottoms = [], [], [], []
+
+            for x_c, y_c, w, h in bboxes:
+                if w <= 0 or h <= 0:
+                    continue
+                if w < h:
+                    norm_w, norm_h = 1.0, h / w
+                else:
+                    norm_w, norm_h = w / h, 1.0
+                norm_aspect_ratios.append((norm_w, norm_h))
+
+                lefts.append(x_c - w / 2)
+                rights.append(x_c + w / 2)
+                tops.append(y_c - h / 2)
+                bottoms.append(y_c + h / 2)
+
+            if norm_aspect_ratios:
+                avg_w = np.mean([w for w, _ in norm_aspect_ratios])
+                avg_h = np.mean([h for _, h in norm_aspect_ratios])
+
+                left_margin = np.min(lefts)
+                right_margin = 1.0 - np.max(rights)
+                top_margin = np.min(tops)
+                bottom_margin = 1.0 - np.max(bottoms)
+
+                print(f"Processed image: {os.path.basename(image_file)} - "
+                      f"boxes found: {total_boxes}, boxes removed: {removed_boxes}, "
+                      f"img aspect: {image_aspect_ratio:.2f}, "
+                      f"avg bbox aspect (w,h): ({avg_w:.2f}, {avg_h:.2f}), "
+                      f"margins (L,R,T,B): ({left_margin:.2f}, {right_margin:.2f}, {top_margin:.2f}, {bottom_margin:.2f})")
+            else:
+                print(
+                    f"Processed image: {os.path.basename(image_file)} - boxes found: {total_boxes}, boxes removed: {removed_boxes}, "
+                    f"img aspect: {image_aspect_ratio:.2f}")
+
     return removed_images
+
 
 def find_bounding_boxes(pil_image, white_thresh=220):
     image_np = np.array(pil_image.convert("RGB"))
@@ -86,6 +135,7 @@ def find_bounding_boxes(pil_image, white_thresh=220):
     _, mask = cv2.threshold(gray, white_thresh, 255, cv2.THRESH_BINARY_INV)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return [cv2.boundingRect(cnt) for cnt in contours]
+
 
 def load_object_patches():
     object_patches = []
@@ -106,6 +156,7 @@ def load_object_patches():
         except Exception as e:
             print(f"Error processing {path}: {e}")
     return object_patches
+
 
 def apply_noise_to_image(img, object_patches):
     img = img.convert("RGBA")
@@ -151,15 +202,16 @@ def apply_noise_to_image(img, object_patches):
         overlay.paste(obj_rgba, (pos_x, pos_y), obj_rgba)
 
     # Gaussian noise with 50% chance
-    if random.random() < 0.5:
+    if random.random() < GAUSS_NOISE_PROBABILITY:
         noisy_img = np.array(overlay.convert("RGB"), dtype=np.float32)
-        std_dev = random.uniform(10, 50)
+        std_dev = random.uniform(GAUSS_NOISE_STD_MIN, GAUSS_NOISE_STD_MAX)
         noise = np.random.normal(0, std_dev, noisy_img.shape)
         noisy_img += noise
         noisy_img = np.clip(noisy_img, 0, 255).astype(np.uint8)
         return Image.fromarray(noisy_img)
 
     return overlay.convert("RGB")
+
 
 # ========== EXECUTION ==========
 
@@ -225,3 +277,70 @@ for split in ['train', 'valid', 'test']:
         print(f"Augmented {img_name} with {NOISE_COPIES_PER_IMAGE} noisy copies.")
 
 print("Augmentation done!")
+
+# ========== PLOT SAMPLE NOISY IMAGES WITH BBOXES ==========
+
+print("Collecting noisy images for plotting...")
+noisy_images_paths = []
+
+for split in ['train', 'valid', 'test']:
+    images_dir = os.path.join(filtered_path, split, 'images')
+    if not os.path.exists(images_dir):
+        continue
+    for fname in os.listdir(images_dir):
+        if '_aug' in fname and fname.lower().endswith(image_extensions):
+            noisy_images_paths.append(os.path.join(images_dir, fname))
+
+if len(noisy_images_paths) >= MAX_IMAGES_TO_PLOT:
+    sample_paths = random.sample(noisy_images_paths, MAX_IMAGES_TO_PLOT)
+else:
+    sample_paths = noisy_images_paths
+
+fig, axes = plt.subplots(
+    nrows=len(sample_paths),
+    figsize=(ENLARGE_SCALE * 6, ENLARGE_SCALE * len(sample_paths)),
+    dpi=100
+)
+
+# Ensure axes is iterable
+if len(sample_paths) == 1:
+    axes = [axes]
+
+for ax, img_path in zip(axes, sample_paths):
+    img = Image.open(img_path).convert("RGB")
+    img_w, img_h = img.size
+    ax.imshow(img)
+
+    # Derive label path
+    base_name = os.path.splitext(os.path.basename(img_path))[0]
+    split = img_path.split(os.sep)[-3]
+    label_path = os.path.join(filtered_path, split, 'labels', base_name + '.txt')
+
+    if os.path.isfile(label_path):
+        with open(label_path, 'r') as f:
+            lines = f.readlines()
+        for line in lines:
+            parts = line.strip().split()
+            if len(parts) != 5:
+                continue
+            cls, x_c, y_c, w, h = map(float, parts)
+            x_c *= img_w
+            y_c *= img_h
+            w *= img_w
+            h *= img_h
+            x1 = x_c - w / 2
+            y1 = y_c - h / 2
+            rect = plt.Rectangle(
+                (x1, y1), w, h,
+                edgecolor='lime', facecolor='none', linewidth=2
+            )
+            ax.add_patch(rect)
+            ax.text(x1, y1 - 5, f'{int(cls)}', color='lime', fontsize=10, backgroundcolor='black')
+
+    ax.axis('off')
+    ax.set_title(os.path.basename(img_path), fontsize=8)
+
+plt.tight_layout()
+plt.show()
+
+
