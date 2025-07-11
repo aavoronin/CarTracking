@@ -4,46 +4,19 @@ import torch
 import matplotlib.pyplot as plt
 import pandas as pd
 from ultralytics import YOLO
+from ultralytics.data.dataset import YOLODataset
+from ultralytics.data.augment import Albumentations
+import albumentations as A
 
 torch.cuda.empty_cache()  # Frees unreferenced cached memory
 torch.cuda.ipc_collect()  # Releases inter-process memory
 torch.cuda.set_per_process_memory_fraction(0.6, device=0)
 
 # === Setup ===
-data_yaml_path = '/mnt/c/Kaggle/train_data/rail_cars/Railroad-Cars-7/data.yaml'
-target_model_dir = '/mnt/c/Kaggle/models/rail_cars10'
+data_yaml_path = '/mnt/c/Kaggle/train_data/rail_cars/Railroad-Cars-9_filtered/data.yaml'
+target_model_dir = '/mnt/c/Kaggle/models/rail_cars13'
 project_path = os.path.join(target_model_dir, 'runs/detect')
 os.makedirs(target_model_dir, exist_ok=True)
-
-from ultralytics.data.dataset import YOLODataset
-
-# Save original method
-_original_getitem = YOLODataset.__getitem__
-
-
-# Patch method to filter small boxes
-def _patched_getitem(self, index):
-    sample = _original_getitem(self, index)
-    if sample is None:
-        return None
-
-    bboxes = sample['bboxes']
-    cls = sample['cls']
-
-    # Filter out boxes smaller than min_wh (in pixels)
-    min_wh = 4  # Change this threshold as needed
-    keep = []
-    for i, (x1, y1, x2, y2) in enumerate(bboxes):
-        if (x2 - x1) >= min_wh and (y2 - y1) >= min_wh:
-            keep.append(i)
-
-    sample['bboxes'] = [bboxes[i] for i in keep]
-    sample['cls'] = [cls[i] for i in keep]
-    return sample
-
-
-# Apply patch
-YOLODataset.__getitem__ = _patched_getitem
 
 
 def plot_losses_from_csv(csv_path, run_name):
@@ -115,13 +88,13 @@ def plot_losses_from_csv(csv_path, run_name):
 # === Training Loop ===
 # for epochs in [10, 60, 130]:
 for model_path in [
+    # 'yolov8s.pt',
     'yolov8m.pt',
-    'yolov8s.pt',
     'yolov8l.pt'
 ]:
     prev_model_path = None
     pretrained_epochs = 0
-    for epochs in [50]:
+    for epochs in [250]:
         model_base = os.path.splitext(model_path)[0]
         run_name = f"{model_base}_railway_model_{epochs + pretrained_epochs}epoch"
         dest_best_path = os.path.join(target_model_dir, f"{run_name}.pt")
@@ -141,7 +114,7 @@ for model_path in [
             epochs=epochs,  # Number of training epochs
             imgsz=640,  # Input image size (will be resized to 640x640 before training)
             batch=1,  # Batch size (images per GPU during training)
-            workers=2 if model_path not in ['yolov8l.pt', 'yolov8x.pt'] else 1,
+            workers=2 if model_path not in ['yolov8x.pt'] else 1,
             # Number of dataloader worker threads (reduce for large models)
             device=0,  # CUDA device ID to use (0 = first GPU)
 
@@ -161,6 +134,8 @@ for model_path in [
             mosaic=0,  # 0.8,                  # Probability of using 4-image mosaic augmentation
             mixup=0,  # 0.1,                   # Probability of using mixup (combining images)
             degrees=4.0,  # Random rotation in degrees
+            save_period=5,
+            exist_ok=True,
         )
 
         # === Parse training results from results.csv and plot ===
