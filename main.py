@@ -21,6 +21,7 @@
 #!pip install lap>=0.5.12
 
 """
+
 import cv2
 import torch
 import os
@@ -28,9 +29,7 @@ import time
 import math
 import platform
 import yaml
-#from moviepy.video.compositing.CompositeVideoClip import concatenate_videoclips
 from moviepy.editor import concatenate_videoclips, VideoFileClip
-#from moviepy import VideoFileClip
 from collections import defaultdict, deque
 from datetime import timedelta
 from ultralytics import YOLO
@@ -39,9 +38,36 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.decomposition import PCA
 
-
-
 class YeloVideoProcessor:
+    """
+    A comprehensive video processing class that utilizes YOLO (You Only Look Once) models
+    for real-time object detection and tracking in video streams.
+
+    This class supports loading multiple YOLO models, each specialized for detecting
+    different classes of objects. It performs detection, tracks objects across frames,
+    smooths detection results, draws bounding boxes and track history, and analyzes
+    object movements relative to user-defined crossing lines.
+
+    Features include:
+    - Loading and managing multiple YOLO models with customizable class filters.
+    - Normalizing file paths to support Windows, Linux, and WSL environments.
+    - Preprocessing video frames for detection at specified resolutions.
+    - Tracking objects over time to maintain consistent IDs.
+    - Validating object movement to reduce false positives.
+    - Visualizing detections, track histories, and crossing line statistics on frames.
+    - Computing and displaying detailed crossing statistics per frame.
+
+    Intended for applications in surveillance, traffic monitoring, pedestrian counting,
+    and any scenario requiring multi-class object detection and tracking in video data.
+
+    Attributes:
+        model_classes (list): List of dictionaries with model paths and their target classes.
+        device (torch.device): The computing device (CPU or GPU) to run models on.
+        models (list): Loaded YOLO models with their respective class filters.
+        min_bboxes (int): Minimum bounding boxes required to validate object movement.
+        frames_back (int): Number of previous frames to consider for tracking history.
+        frames_forward (int): Number of future frames to consider for tracking history.
+    """
     def __init__(self, model_classes, n_history=200):
         self.model_classes = model_classes
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -55,11 +81,20 @@ class YeloVideoProcessor:
         self.min_bboxes = 8
 
     def normalize_path(self, path):
+        """
+        Converts Windows-style paths to WSL/Linux format if running in WSL environment.
+        Replaces 'C:\' with '/mnt/c/' and backslashes with slashes.
+        """
         if 'microsoft' in platform.uname().release.lower() and path.startswith('C:\\'):
             path = path.replace('C:\\', '/mnt/c/').replace('\\', '/')
         return path
 
     def _load_models(self):
+        """
+        Loads YOLO models and assigns associated class filters.
+        Each model is normalized for platform path, loaded using YOLOv8,
+        and moved to the target device (e.g., GPU).
+        """
         for entry in self.model_classes:
             model_path = entry['model']
             classes = set(entry['classes'])
@@ -70,13 +105,22 @@ class YeloVideoProcessor:
             print(f"✅ Loaded model: {model_path} with classes: {classes}")
 
     def get_text_height(self):
+        """
+        Computes and returns the approximate text height for display on frames
+        using a reference character with a specified font and scale.
+        """
         (_, h), baseline = cv2.getTextSize('W', cv2.FONT_HERSHEY_SIMPLEX, 1.2, 2)
         return h + 2
 
     def preprocess_frame(self, detect_resolution, frame):
+        """Resizes input frame to the given detection resolution for YOLO processing."""
         return cv2.resize(frame, detect_resolution)
 
     def _draw_track_history(self, frame, history, color):
+        """
+        Draws a smoothed trajectory line showing object movement across frames.
+        Skips drawing very short lines to avoid noise; draws only if movement exceeds 5 pixels.
+        """
         prev_i = 0
         prev_line_length = 0
         for i in range(1, len(history)):
@@ -94,6 +138,10 @@ class YeloVideoProcessor:
 
     def determine_object_validity(self, track_id, detection_index, all_detections, model_idx,
                               screen_size):
+        """
+        Determines whether a tracked object is "valid" based on its movement across frames.
+        Requires minimum number of bboxes and checks if movement exceeds 10% of screen diagonal.
+        """
 
         bboxes = self.collect_bboxes(all_detections, detection_index, model_idx, track_id)
 
@@ -108,6 +156,10 @@ class YeloVideoProcessor:
         return movement >= (screen_diagonal / 10)
 
     def collect_bboxes(self, all_detections, detection_index, model_idx, track_id):
+        """
+        Collects center coordinates of bounding boxes for a specific object track across a window of frames.
+        Only includes records matching the given `track_id` and `model_idx`.
+        """
         bboxes = []
         start = max(0, detection_index - self.frames_back)
         end = min(len(all_detections), detection_index + self.frames_forward)
@@ -127,7 +179,12 @@ class YeloVideoProcessor:
 
     def draw_data_on_frame(self, box_color, frame, valid_records, all_detections, frame_detections,
                        detection_index, crossing_lines, crossing_stats):
+        """
+        Renders visual information on a video frame: bounding boxes, IDs,
+        confidence scores, and crossing stats.
+        """
 
+        # Draw line overlays used for tracking object crossing events.
         self.draw_crossing_lines(frame, crossing_lines, box_color)
 
         # === Draw object bounding boxes and labels ===
@@ -167,6 +224,32 @@ class YeloVideoProcessor:
                     y_base += line_height
 
     def process_detections(self, all_detections, crossing_lines):
+        """
+        Cleans, filters, interpolates, and smooths object detections across frames.
+
+        Main stages:
+        1. Merge overlapping detections with different class labels.
+        2. Filter redundant detections.
+        3. Group and track individual objects using `track_id`.
+        4. Interpolate missing frames for track continuity.
+        5. Apply smoothing to reduce jitter in object positions.
+        6. Calculate trajectory metrics for debugging/analysis.
+
+        Parameters:
+        -----------
+        all_detections : List[List[dict]]
+            A list of lists of detection records per frame.
+            Each detection is a dict containing at least:
+            - 'track_id', 'class_name', 'model_idx', 'frame_index', 'bbox', 'conf'
+
+        crossing_lines : Any
+            Currently unused, placeholder for future line-crossing analysis.
+
+        Returns:
+        --------
+        List[List[dict]]
+            Updated detection list with interpolated and smoothed results.
+        """
         def compute_section_averages(lst):
             n = len(lst)
             third = n // 3
@@ -234,8 +317,6 @@ class YeloVideoProcessor:
 
             normalized_metric = avg_distance / range_proj
             return normalized_metric
-
-        import numpy as np
 
         def compute_iou(box1, box2):
             """Compute IoU between two [x1, y1, x2, y2] boxes"""
@@ -392,6 +473,24 @@ class YeloVideoProcessor:
 
 
     def create_smooth_detections(self, min_f, max_f, frame_map):
+        """
+        Applies temporal smoothing to bounding box coordinates and confidence scores
+        over a tracklet (a sequence of detections belonging to the same object).
+
+        Parameters:
+        -----------
+        min_f : int
+            First frame index of the object track.
+        max_f : int
+            Last frame index of the object track.
+        frame_map : dict
+            Mapping from frame index to detection record, where each record includes:
+            - 'bbox': [x1, y1, x2, y2]
+            - 'conf': float (confidence score)
+
+        This method uses a Savitzky-Golay filter to reduce jitter in the object's
+        trajectory across frames, improving visual and analytical consistency.
+        """
         total_frames = max_f - min_f + 1
 
         # If too few frames, skip smoothing – just copy original values
@@ -450,77 +549,79 @@ class YeloVideoProcessor:
 
 
     def collect_crossing_stats(self, all_detections, crossing_lines):
+        """
+        Analyze object tracks and detect if/when objects cross specified lines, tracking counts per class and line.
+        """
+
+        # Generate a unique ID per tracked object
         def unique_key(rec):
             return (rec['track_id'], rec['model_idx'], rec['class_name'])
 
+        # Compute center point of a bounding box
         def bbox_center(bbox):
             x1, y1, x2, y2 = bbox
             return ((x1 + x2) / 2, (y1 + y2) / 2)
 
+        # Determine which side of a line a point lies on using the cross product
         def point_side_of_line(px, py, x1, y1, x2, y2):
             return (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1)
 
+        # Normalize a vector (unit length)
         def normalize(v):
             norm = np.linalg.norm(v)
             return v / norm if norm > 0 else v
 
+        # Estimate motion direction from a list of 2D points using PCA
         def compute_motion_vector(points, linearity_threshold=0.2):
             if len(points) < 2:
                 return None
 
             data = np.array(points)
-
-            # Center the data
             centered = data - np.mean(data, axis=0)
 
-            # Run PCA
             pca = PCA(n_components=2)
             pca.fit(centered)
 
-            # Check how linear the motion is (first PC must explain most variance)
             if pca.explained_variance_ratio_[0] < linearity_threshold:
-                return None
+                return None  # motion is not linear enough
 
-            # Dominant direction (unit vector)
             direction = pca.components_[0]
-
-            # Project data onto direction and compute total spread (motion magnitude)
             projections = centered @ direction
             magnitude = projections.max() - projections.min()
 
-            # Final motion vector
             motion_vector = direction * magnitude
 
-            # Flip direction if it disagrees with actual motion from first to last point
+            # Flip vector if it goes opposite to actual motion
             first_to_last = data[-1] - data[0]
             if np.dot(first_to_last, motion_vector) < 0:
                 motion_vector *= -1
 
             return motion_vector.tolist()
 
-
+        # Normalize motion vector
         def fit_motion_vector_normalized(direction):
             if direction is None:
                 return None
             return normalize(direction)
 
+        # Get normalized direction vector of a line
         def line_direction(x1, y1, x2, y2):
             return normalize(np.array([x2 - x1, y2 - y1]))
 
         if len(all_detections) == 0:
             return None
 
-        # --- Preparation ---
+        # --- Prepare object tracks and max frame index ---
         max_frame_index = max(rec['frame_index'] for frame in all_detections for rec in frame)
         object_tracks = defaultdict(list)
         for frame_dets in all_detections:
             for rec in frame_dets:
                 object_tracks[unique_key(rec)].append(rec)
 
-        # For frame-by-frame stats
-        per_frame_stats = []
-        already_counted = set()
+        per_frame_stats = []  # List of stats per frame
+        already_counted = set()  # Tracks already counted objects
 
+        # --- Frame-by-frame analysis ---
         for current_frame in range(max_frame_index + 1):
             frame_stats = defaultdict(lambda: defaultdict(int))  # line_name -> class_name -> count
 
@@ -528,7 +629,7 @@ class YeloVideoProcessor:
                 if obj_id in already_counted:
                     continue
 
-                # Filter past detections up to current frame
+                # Filter detections up to current frame
                 past_track = [r for r in track if r['frame_index'] <= current_frame]
                 if len(past_track) < self.min_bboxes:
                     continue
@@ -545,31 +646,32 @@ class YeloVideoProcessor:
                         elif side > 0:
                             right += 1
 
+                    # If object hasn't been clearly on both sides, skip
                     if left < 3 or right < 3:
                         continue
 
                     line_vec = line_direction(lx1, ly1, lx2, ly2)
-
                     motion_vector = compute_motion_vector(centers)
                     motion_vector_norm = fit_motion_vector_normalized(motion_vector)
                     if motion_vector_norm is None:
                         continue
 
+                    # Use dot product to determine if object is crossing in the direction of the line
                     dot_product = np.dot(motion_vector_norm, line_vec)
                     if dot_product <= 0:
-                        continue
+                        continue  # Not a valid crossing (wrong direction)
 
                     vector_len = math.hypot(motion_vector[0], motion_vector[0])
                     print(f"{track[0].get('track_id')} crossed '{line_name}' " +
                           f"(dot_product: {dot_product:.3f}) vector_len: {vector_len:.3f}")
 
-                    # Valid crossing
+                    # Valid crossing – count it
                     class_name = obj_id[2]
                     frame_stats[line_name][class_name] += 1
                     already_counted.add(obj_id)
-                    break  # only one line per object
+                    break  # one crossing per object
 
-            # Combine current frame stats with previous frame's totals
+            # --- Accumulate stats ---
             if per_frame_stats:
                 prev_stats = per_frame_stats[-1]
                 combined_stats = defaultdict(lambda: defaultdict(int))
@@ -582,9 +684,24 @@ class YeloVideoProcessor:
                 per_frame_stats.append(combined_stats)
             else:
                 per_frame_stats.append(frame_stats)
+
         return per_frame_stats
 
     def draw_crossing_lines(self, frame, crossing_lines, color):
+        """
+            Draws dotted crossing lines with arrowheads and labels on a video frame.
+
+            Args:
+                frame (np.ndarray): The image frame on which to draw the lines.
+                crossing_lines (dict): A dictionary where keys are direction labels and values are
+                                       tuples of coordinates (x1, y1, x2, y2) defining each line.
+                color (tuple): BGR color tuple to draw the lines and arrows.
+
+            Functionality:
+                - For each crossing line, draws a dotted line between the start (x1, y1) and end (x2, y2) points.
+                - Adds an arrowhead at the end of each line to indicate direction.
+
+        """
         for direction, coords in crossing_lines.items():
             x1, y1, x2, y2 = coords
 
@@ -604,29 +721,63 @@ class YeloVideoProcessor:
             # Draw arrowhead
             cv2.arrowedLine(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2, tipLength=0.02)
 
-            # Compute label position at 75% from start to end (1/4 from the end)
-            alpha = 0.75
-            label_x = int(x1 * (1 - alpha) + x2 * alpha)
-            label_y = int(y1 * (1 - alpha) + y2 * alpha)
 
-            """
-            # Draw direction label
-            cv2.putText(
-                frame,
-                direction,
-                (label_x, label_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                color,
-                2,
-                cv2.LINE_AA
-            )
-            """
 
 
     def run_detection(self, input_files, output_file, detection_threshold=0.3, box_color=(0, 255, 0),
-                  detect_resolution=(1280, 720), target_resolution=(1280, 720), crossing_lines = dict(),
-                      limit_on_frames=9999999):
+                  detect_resolution=(1280, 720), target_resolution=(1280, 720), crossing_lines=dict(),
+                  limit_on_frames=9999999):
+        """
+        Runs object detection and multi-object tracking on one or more input video files using YOLO models and BoT-SORT.
+
+        Parameters:
+        -----------
+        input_files : list of str
+            Paths to input video files to be processed.
+        output_file : str
+            Path where the output annotated video will be saved.
+        detection_threshold : float, default=0.3
+            Minimum confidence score required for keeping a detection.
+        box_color : tuple, default=(0, 255, 0)
+            Color of the bounding boxes (in BGR format).
+        detect_resolution : tuple, default=(1280, 720)
+            Resolution to which each frame is resized before feeding into the detector.
+        target_resolution : tuple, default=(1280, 720)
+            Final resolution for the output video frames.
+        crossing_lines : dict, optional
+            Dictionary of crossing lines used for post-analysis of tracked object trajectories.
+        limit_on_frames : int, default=9999999
+            Maximum number of frames to process per video.
+
+        Workflow:
+        ---------
+        1. Initializes a custom BoT-SORT tracker configuration and writes it to 'botsort.yaml'.
+        2. First pass:
+            - For each video:
+                - Reads each frame, resizes for detection.
+                - Runs detection using all loaded models.
+                - Tracks objects with BoT-SORT, assigning unique `track_id`s.
+                - Filters and stores valid detections based on confidence, size, class, and tracking.
+        3. Post-processes detections for events like line-crossing analysis.
+        4. Second pass:
+            - Reads each frame again.
+            - Validates and draws tracked bounding boxes and metadata.
+            - Writes the annotated video to `output_file`.
+
+        Notes:
+        ------
+        - Detection uses `track()` with the BoT-SORT tracker and IOU-based matching.
+        - Each object is tracked uniquely per model by offsetting track IDs.
+        - Supports early exit via frame limit.
+        - Tracks are optionally validated for events like crossing lines before drawing.
+        - Uses OpenCV for both reading/writing video and drawing.
+
+        Output:
+        -------
+        A video file saved at `output_file` with annotations showing bounding boxes, class labels,
+        tracking IDs, and optionally line-crossing indicators.
+        """
+
 
         input_files = [self.normalize_path(p) for p in input_files]
         output_file = self.normalize_path(output_file)
@@ -817,6 +968,31 @@ class YeloVideoProcessor:
 
 
     def post_process_video(self, input_file, intervals=None, compression=3):
+        """
+        Processes a video by optionally trimming it to specified intervals and compressing it.
+
+        Parameters:
+        ----------
+        input_file : str
+            Path to the original video file.
+        intervals : list of tuple, optional
+            A list of (start, end) tuples in seconds specifying subclips to extract from the video.
+            If not provided, the full video is used.
+        compression : int, default=3
+            Compression level to apply when saving the output video:
+                1 - H.264 codec with standard quality (libx264 + AAC)
+                2 - H.265 codec with visually lossless compression (libx265, CRF 18, slow preset)
+                3 - H.265 codec with lossless compression (libx265, CRF 0)
+
+        Behavior:
+        --------
+        - Loads the input video using moviepy.
+        - If `intervals` are provided, extracts the corresponding subclips and concatenates them.
+          Invalid intervals are skipped with a warning.
+        - The final video is written to disk with compression as specified.
+        - The output filename will have '_processed' appended to the original filename.
+        - Saves the video to disk and logs the output path.
+        """
         base, ext = os.path.splitext(input_file)
         output_file = self.normalize_path(f"{base}_processed{ext}")
         clip = VideoFileClip(self.normalize_path(input_file))
@@ -825,14 +1001,15 @@ class YeloVideoProcessor:
             subclips = []
             for start, end in intervals:
                 try:
-                    subclip = clip[start:end]
+                    subclip = clip.subclip(start, end)
                     subclips.append(subclip)
                 except Exception as e:
                     print(f"⚠️ Skipping invalid interval ({start} - {end}): {e}")
             if not subclips:
                 print("❌ No valid intervals provided.")
-                return
-            final_clip = concatenate_videoclips(subclips)
+                final_clip = clip
+            else:
+                final_clip = concatenate_videoclips(subclips)
         else:
             final_clip = clip
 
@@ -845,6 +1022,7 @@ class YeloVideoProcessor:
             final_clip.write_videofile(output_file, codec='libx265', audio_codec='aac',
                                        ffmpeg_params=['-crf', '0'])
         print(f"✅ Video saved to: {output_file}")
+
 
 
 # === Example usage ===
@@ -874,22 +1052,21 @@ if __name__ == "__main__":
     crossing_lines = {
                         "right-to-left": [int(tr[0] * 0.30), 0, int(tr[0] * 0.20), tr[1] - 1],
                         "left-to-right": [int(tr[0] * 0.22), tr[1] - 1, int(tr[0] * 0.32), 0],
-                        "crossing-right-to-left": [0, int(tr[1] * 0.8), tr[0] - 1, int(tr[1] * 0.45)],
-                        "crossing-left-to-right": [tr[0] - 1, int(tr[1] * 0.47), 0, int(tr[1] * 0.82)],
+                        #"crossing-right-to-left": [0, int(tr[1] * 0.8), tr[0] - 1, int(tr[1] * 0.45)],
+                        #"crossing-left-to-right": [tr[0] - 1, int(tr[1] * 0.47), 0, int(tr[1] * 0.82)],
 
                      }
 
-    output_file = fr"C:\Kaggle\Video\Tracking\Folkston_Georgia_USA_8_{detection_threshold:.2f}.mp4"
+    output_file = fr"C:\Kaggle\Video\Tracking\Folkston_Georgia_USA_9_{detection_threshold:.2f}.mp4"
     input_files = [
-        fr"C:\recordings\Folkston_Georgia_USA_{i:04}.mp4" for i in range(17, 18)
+        fr"C:\recordings\Folkston_Georgia_USA_{i:04}.mp4" for i in range(16, 17)
     ]
 
     processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
                             detect_resolution=(1280, 720),
                             target_resolution=tr,
                             crossing_lines=crossing_lines, limit_on_frames=300000000000)
-    processor.post_process_video(output_file, compression=1) #, intervals=[('00:25', '03:50')
-
+    processor.post_process_video(output_file, compression=1, intervals=[('00:02', '00:15')])
 
 '''
     crossing_lines = { 
