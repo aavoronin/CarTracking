@@ -13,8 +13,8 @@ torch.cuda.ipc_collect()  # Releases inter-process memory
 torch.cuda.set_per_process_memory_fraction(0.6, device=0)
 
 # === Setup ===
-data_yaml_path = '/mnt/c/Kaggle/train_data/rail_cars/Railroad-Cars-9_filtered/data.yaml'
-target_model_dir = '/mnt/c/Kaggle/models/rail_cars13'
+data_yaml_path = '/mnt/c/Kaggle/train_data/rail_cars/Railroad-Cars-10_filtered/data.yaml'
+target_model_dir = '/mnt/c/Kaggle/models/rail_cars14'
 project_path = os.path.join(target_model_dir, 'runs/detect')
 os.makedirs(target_model_dir, exist_ok=True)
 
@@ -113,8 +113,9 @@ for model_path in [
             data=data_yaml_path,  # Path to data YAML file (contains class names and train/val image dirs)
             epochs=epochs,  # Number of training epochs
             imgsz=640,  # Input image size (will be resized to 640x640 before training)
+            cache=False,  # Don't preload into RAM
             batch=1,  # Batch size (images per GPU during training)
-            workers=2 if model_path not in ['yolov8x.pt'] else 1,
+            workers=2 if model_path not in ['yolov8l.pt', 'yolov8x.pt'] else 1,
             # Number of dataloader worker threads (reduce for large models)
             device=0,  # CUDA device ID to use (0 = first GPU)
 
@@ -124,18 +125,21 @@ for model_path in [
             # --- Data Augmentation Parameters ---
             fliplr=0.5,  # Probability of horizontal flip (left/right)
             flipud=0.0,  # Probability of vertical flip (up/down)
-            hsv_h=0,  # 0.015,                 # HSV hue augmentation (fractional change)
-            hsv_s=0,  # 0.7,                   # HSV saturation augmentation
-            hsv_v=0,  # 0.4,                   # HSV value (brightness) augmentation
+            hsv_h=0.01,  # 0.015,          # HSV hue augmentation (fractional change)
+            hsv_s=0.1,  # 0.7,             # HSV saturation augmentation
+            hsv_v=0.1,  # 0.4,             # HSV value (brightness) augmentation
             scale=0.8,  # Image scale range (zoom in/out)
             translate=0.1,  # Image translation as a fraction of image size
             shear=2.0,  # Shear angle in degrees
             perspective=0.0005,  # Perspective transform distortion
-            mosaic=0,  # 0.8,                  # Probability of using 4-image mosaic augmentation
-            mixup=0,  # 0.1,                   # Probability of using mixup (combining images)
+            mosaic=0.2,  # Probability of using 4-image mosaic augmentation
+            mixup=0.05,  # 0.1,                   # Probability of using mixup (combining images)
             degrees=4.0,  # Random rotation in degrees
             save_period=5,
             exist_ok=True,
+            dropout=0.2,  # Dropout rate for regularization (e.g., 0.0 to 0.5)
+            patience=40,  # Early stopping patience in epochs (stop if no improvement)
+
         )
 
         # === Parse training results from results.csv and plot ===
