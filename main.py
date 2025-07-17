@@ -235,6 +235,58 @@ class YeloVideoProcessor:
             normalized_metric = avg_distance / range_proj
             return normalized_metric
 
+        import numpy as np
+
+        def compute_iou(box1, box2):
+            """Compute IoU between two [x1, y1, x2, y2] boxes"""
+            x1, y1, x2, y2 = box1
+            x1b, y1b, x2b, y2b = box2
+
+            xi1 = max(x1, x1b)
+            yi1 = max(y1, y1b)
+            xi2 = min(x2, x2b)
+            yi2 = min(y2, y2b)
+            inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+
+            box1_area = (x2 - x1) * (y2 - y1)
+            box2_area = (x2b - x1b) * (y2b - y1b)
+            union_area = box1_area + box2_area - inter_area
+
+            return inter_area / union_area if union_area > 0 else 0
+
+        # === First Pass: Group by frame_index ===
+        frame_detections = {}
+        for detections in all_detections:
+            for rec in detections:
+                frame_index = rec['frame_index']
+                frame_detections.setdefault(frame_index, []).append(rec)
+
+        # === Find low-confidence overlapping boxes ===
+        to_delete_ids = set()
+        for frame_index, recs in frame_detections.items():
+            for i in range(len(recs)):
+                for j in range(i + 1, len(recs)):
+                    iou = compute_iou(recs[i]['bbox'], recs[j]['bbox'])
+                    if iou > 0.7 and recs[i]['class_name'] != recs[j]['class_name']:
+                        if recs[i]['conf'] < recs[j]['conf']:
+                            d_index = i
+                            to_delete_ids.add(id(recs[i]))
+                        else:
+                            d_index = j
+                        to_delete_ids.add(id(recs[d_index]))
+                        drec = recs[d_index]
+                        print(f"deleted track_id {drec.get('track_id')} on frame {drec['frame_index']} " + \
+                              f"Class: {drec.get('class_name')}, BBox: {drec['bbox']}, Conf: {drec['conf']:.3f}")
+
+        # === Second Pass: Filter detections using your loop structure ===
+        for detections in all_detections:
+            filtered = []
+            for rec in detections:
+                if id(rec) not in to_delete_ids:
+                    filtered.append(rec)
+            detections[:] = filtered  # Modify in place
+
+
         # Set to keep track of already processed track_ids
         used = set()
 
@@ -550,7 +602,7 @@ class YeloVideoProcessor:
                 cv2.line(frame, (px1, py1), (px2, py2), color, 1)
 
             # Draw arrowhead
-            cv2.arrowedLine(frame, (x1, y1), (x2, y2), color, 2, tipLength=0.02)
+            cv2.arrowedLine(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2, tipLength=0.02)
 
             # Compute label position at 75% from start to end (1/4 from the end)
             alpha = 0.75
@@ -609,6 +661,9 @@ class YeloVideoProcessor:
         frame_idx = 0
         video_start_time = time.time()
         last_report_time = video_start_time
+        #cleaning tracker
+        for model_entry in self.models:
+            model_entry['model'].tracker = None
 
         print("\n🚀 FIRST PASS: Running detection...")
         for video_path in input_files:
@@ -636,44 +691,51 @@ class YeloVideoProcessor:
                 detections_this_frame = []
 
                 for model_idx, model_entry in enumerate(self.models):
-                    model = model_entry['model']
-                    classes = model_entry['classes']
-                    #result = model.track(detect_frame, persist=True, verbose=False)[0]
-                    result = model.track(
-                        detect_frame,
-                        persist=True,
-                        verbose=False,
-                        tracker="botsort.yaml",  # make sure this file exists
-                        conf=detection_threshold,
-                        iou=0.1,
-                    )[0]
+                    try:
+                        model = model_entry['model']
+                        classes = model_entry['classes']
+                        #result = model.track(detect_frame, persist=True, verbose=False)[0]
+                        result = model.track(
+                            detect_frame,
+                            persist=True,
+                            verbose=False,
+                            tracker="botsort.yaml",  # make sure this file exists
+                            conf=detection_threshold,
+                            iou=0.1,
+                        )[0]
 
 
-                    for box in result.boxes:
-                        if box.id is None:
-                            continue
-                        cls_id = int(box.cls)
-                        class_name = model.names.get(cls_id, "unknown")
-                        if class_name not in classes:
-                            continue
-                        if float(box.conf) < detection_threshold:
-                            continue
+                        for box in result.boxes:
+                            if box.id is None:
+                                continue
+                            cls_id = int(box.cls)
+                            class_name = model.names.get(cls_id, "unknown")
+                            if class_name not in classes:
+                                continue # not the class we need
+                            if box.conf is None:
+                                continue # no confidence
+                            if float(box.conf) < detection_threshold:
+                                continue  # confidence  too small
 
-                        x1, y1, x2, y2 = box.xyxy[0].tolist()
-                        track_id = int(box.id) + (model_idx + 1) * 1_000_000
-                        if box.conf is None:
-                            continue
+                            x1, y1, x2, y2 = box.xyxy[0].tolist()
+                            w, h = x2 - x1, y2 - y1
+                            if w <= 10 or h <= 10 or np.isnan(w) or np.isnan(h):
+                                continue #too small a bbox
+                            track_id = int(box.id) + (model_idx + 1) * 1_000_000
 
-                        conf = float(box.conf)
+                            conf = float(box.conf)
 
-                        detections_this_frame.append({
-                            'frame_index': frame_index,
-                            'track_id': track_id,
-                            'model_idx': model_idx,
-                            'class_name': class_name,
-                            'bbox': (x1, y1, x2, y2),
-                            "conf": conf,
-                        })
+                            detections_this_frame.append({
+                                'frame_index': frame_index,
+                                'track_id': track_id,
+                                'model_idx': model_idx,
+                                'class_name': class_name,
+                                'bbox': (x1, y1, x2, y2),
+                                "conf": conf,
+                            })
+                    except Exception as e:
+                        print(e)
+                        continue # detection failed (rarely happend inside yolo)
 
                 all_detections.append(detections_this_frame)
                 frame_index += 1
@@ -788,7 +850,7 @@ class YeloVideoProcessor:
 # === Example usage ===
 if __name__ == "__main__":
 
-    detection_threshold = 0.4
+    detection_threshold = 0.1
     box_color = (0, 0, 255)
 
     allowed_classes = ['car', 'truck', 'bus', 'person', "dog", 'motorcycle']
@@ -801,53 +863,156 @@ if __name__ == "__main__":
         #{'model': "C:\Kaggle/models/rail_cars11/best.pt", 'classes': ['railcar']},
         #{'model': "C:\Kaggle/models/rail_cars12/yolov8m_railway_model_150epoch.pt", 'classes': ['railcar']},
         #{'model': r"C:\Kaggle\models\rail_cars14/runs/detect/yolov8m_railway_model_250epoch/weights/best_75.pt", 'classes': ['railcar']},
-        {'model': r"C:\Kaggle\models\rail_cars14/yolov8m_railway_model_250epoch.pt", 'classes': ['railcar']},
+        #{'model': r"C:\Kaggle\models\rail_cars14/yolov8m_railway_model_250epoch.pt", 'classes': ['railcar']},
+        #{'model': r"C:\Kaggle\models\rail_cars16/runs/detect/yolov8m_railway_model_250epoch/weights/best_130.pt", 'classes': ['railcar']},
+        {'model': r"C:\Kaggle\models\rail_cars16/yolov8m_railway_model_250epoch.pt", 'classes': ['railcar']},
         {'model': "yolov8x.pt", 'classes': ['car', 'truck', 'bus', 'person', "dog", 'motorcycle']},
     ]
-
     processor = YeloVideoProcessor(model_classes)
-
     tr=(1280, 720)
-    crossing_lines = { "left-to-right": [int(tr[0] * 0.42), 0, int(tr[0] * 0.27), tr[1] - 1],
-                       "right-to-left": [int(tr[0] * 0.25), tr[1] - 1, int(tr[0] * 0.40), 0] }
-    for detection_threshold in [0.1, 0.2, 0.3, 0.4, 0.5]:
-        for i, input_files in enumerate([
-            [fr"C:\recordings\Glendale_Static_Ohio2_0001.mp4"],
-            [fr"C:\recordings\Glendale_Static_Ohio2_0003.mp4"],
-            [fr"C:\recordings\Glendale_Static_Ohio2_0004.mp4", fr"C:\recordings\Glendale_Static_Ohio2_0005.mp4"],
-        ]):
-            output_file = fr"C:\Kaggle\Video\Tracking\Glendale_Static_Ohio2_{4 + i}_{detection_threshold:.2f}.mp4"
 
+    crossing_lines = {
+                        "right-to-left": [int(tr[0] * 0.30), 0, int(tr[0] * 0.20), tr[1] - 1],
+                        "left-to-right": [int(tr[0] * 0.22), tr[1] - 1, int(tr[0] * 0.32), 0],
+                        "crossing-right-to-left": [0, int(tr[1] * 0.8), tr[0] - 1, int(tr[1] * 0.45)],
+                        "crossing-left-to-right": [tr[0] - 1, int(tr[1] * 0.47), 0, int(tr[1] * 0.82)],
+
+                     }
+
+    output_file = fr"C:\Kaggle\Video\Tracking\Folkston_Georgia_USA_8_{detection_threshold:.2f}.mp4"
+    input_files = [
+        fr"C:\recordings\Folkston_Georgia_USA_{i:04}.mp4" for i in range(17, 18)
+    ]
+
+    processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
+                            detect_resolution=(1280, 720),
+                            target_resolution=tr,
+                            crossing_lines=crossing_lines, limit_on_frames=300000000000)
+    processor.post_process_video(output_file, compression=1) #, intervals=[('00:25', '03:50')
+
+
+'''
+    crossing_lines = { 
+                        "right-to-left": [int(tr[0] * 0.30), 0, int(tr[0] * 0.20), tr[1] - 1], 
+                        "left-to-right": [int(tr[0] * 0.22), tr[1] - 1, int(tr[0] * 0.32), 0],
+                        #"crossing-right-to-left": [0, int(tr[1] * 0.8), tr[0] - 1, int(tr[1] * 0.45)], 
+                        #"crossing-left-to-right": [tr[0] - 1, int(tr[1] * 0.47), 0, int(tr[1] * 0.82)],
+                     
+                     }
+
+    output_file = fr"C:\Kaggle\Video\Tracking\Folkston_Georgia_USA_7_{detection_threshold:.2f}.mp4"
+    input_files = [
+        fr"C:\recordings\Folkston_Georgia_USA_{i:04}.mp4" for i in range(16, 17)
+    ]
+
+    processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
+                            detect_resolution=(1280, 720),
+                            target_resolution=tr, 
+                            crossing_lines=crossing_lines, limit_on_frames=300000000000)
+    processor.post_process_video(output_file, compression=1) #, intervals=[('00:25', '03:50')     
+
+    
+    input_files = [
+        fr"C:\recordings\Folkston_Georgia_USA_{i:04}.mp4" for i in range(12, 15)
+    ]
+
+
+    crossing_lines = { "left-to-right": [int(tr[0] * 0.50), 0, int(tr[0] * 0.50), tr[1] - 1], 
+                       "right-to-left": [int(tr[0] * 0.52), tr[1] - 1, int(tr[0] * 0.52), 0] }
+    output_file = fr"C:\Kaggle\Video\Tracking\Blue_Island_Illinois_PTZ_3_{detection_threshold:.2f}.mp4"
+    input_files = [
+        fr"C:\recordings\Blue_Island_Illinois_PTZ_{i:04}.mp4" for i in range(4, 7)
+    ]        
+    
+    processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
+                            detect_resolution=(1280, 720),
+                            target_resolution=tr, 
+                            crossing_lines=crossing_lines, limit_on_frames=9000000000)
+    processor.post_process_video(output_file, compression=1) #, intervals=[('00:25', '03:50')         
+
+    crossing_lines = { "right-to-left": [int(tr[0] * 0.30), 0, int(tr[0] * 0.20), tr[1] - 1], 
+                       "left-to-right": [int(tr[0] * 0.22), tr[1] - 1, int(tr[0] * 0.32), 0] }
+
+    output_file = fr"C:\Kaggle\Video\Tracking\Folkston_Georgia_USA_5_{detection_threshold:.2f}.mp4"
+    input_files = [
+        fr"C:\recordings\Folkston_Georgia_USA_{i:04}.mp4" for i in range(1, 5)
+    ]
+
+    processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
+                            detect_resolution=(1280, 720),
+                            target_resolution=tr, 
+                            crossing_lines=crossing_lines, limit_on_frames=120000000000)
+    processor.post_process_video(output_file, compression=1) #, intervals=[('00:25', '03:50')     
+
+    output_file = fr"C:\Kaggle\Video\Tracking\Folkston_Georgia_USA_4_{detection_threshold:.2f}.mp4"
+    input_files = [
+        fr"C:\recordings\Folkston_Georgia_USA_{i:04}.mp4" for i in range(5, 6)
+    ]
+
+    processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
+                            detect_resolution=(1280, 720),
+                            target_resolution=tr, 
+                            crossing_lines=crossing_lines, limit_on_frames=120000000000)
+    processor.post_process_video(output_file, compression=1) #, intervals=[('00:25', '03:50')     
+
+    input_files = [
+        fr"C:\recordings\Folkston_Georgia_USA_{i:04}.mp4" for i in range(5, 6)
+    ]
+    for detection_threshold in [0.1]:
+        for i, input_files in enumerate([
+            [fr"C:\recordings\Glendale_Static_Ohio2_0001.mp4"], 
+            [fr"C:\recordings\Glendale_Static_Ohio2_0003.mp4"], 
+            [fr"C:\recordings\Glendale_Static_Ohio2_0004.mp4", fr"C:\recordings\Glendale_Static_Ohio2_0005.mp4"], 
+        ]):
+            output_file = fr"C:\Kaggle\Video\Tracking\Glendale_Static_Ohio2_{9 + i}_{detection_threshold:.2f}.mp4"
+            crossing_lines = { "right-to-left": [int(tr[0] * 0.42), 0, int(tr[0] * 0.27), tr[1] - 1], 
+                               "left-to-right": [int(tr[0] * 0.25), tr[1] - 1, int(tr[0] * 0.40), 0] }            
+        
             processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
                                     detect_resolution=(1280, 720),
-                                    target_resolution=(1280, 720),
-                                    crossing_lines=crossing_lines, limit_on_frames=300000000)
+                                    target_resolution=(1280, 720), 
+                                    crossing_lines=crossing_lines, limit_on_frames=900000000)
             processor.post_process_video(output_file, compression=1)
 
-        crossing_lines = { "right-to-left": [int(tr[0] * 0.55), 0, int(tr[0] * 0.50), tr[1] - 1],
+        crossing_lines = { "right-to-left": [int(tr[0] * 0.55), 0, int(tr[0] * 0.50), tr[1] - 1], 
                            "left-to-right": [int(tr[0] * 0.55), tr[1] - 1, int(tr[0] * 0.60), 0] }
-
+    
         output_file = fr"C:\Kaggle\Video\Tracking\Tehachapi_Live_Train_Cams_34_{detection_threshold:.2f}.mp4"
         input_files = [
             fr"C:\recordings\Tehachapi_Live_Train_Cams_{i:04}.mp4" for i in range(14, 16)
         ]
 
-        crossing_lines = { "right-to-left": [int(tr[0] * 0.45), 0, int(tr[0] * 0.40), tr[1] - 1],
+        processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
+                                detect_resolution=(1280, 720),
+                                target_resolution=tr, 
+                                crossing_lines=crossing_lines, limit_on_frames=500000000)
+        processor.post_process_video(output_file, compression=1) #, intervals=[('00:25', '03:50')           
+    
+        crossing_lines = { "right-to-left": [int(tr[0] * 0.45), 0, int(tr[0] * 0.40), tr[1] - 1], 
                            "left-to-right": [int(tr[0] * 0.45), tr[1] - 1, int(tr[0] * 0.50), 0] }
-
         output_file = fr"C:\Kaggle\Video\Tracking\Blue_Island_Illinois_PTZ_{detection_threshold:.2f}.mp4"
         input_files = [
             fr"C:\recordings\Blue_Island_Illinois_PTZ_{i:04}.mp4" for i in range(1, 4)
-        ]
-
+        ]        
+        
         processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
                                 detect_resolution=(1280, 720),
-                                target_resolution=tr,
+                                target_resolution=tr, 
                                 crossing_lines=crossing_lines, limit_on_frames=500000000)
-        processor.post_process_video(output_file, compression=1) #, intervals=[('00:25', '03:50')
+        processor.post_process_video(output_file, compression=1) #, intervals=[('00:25', '03:50')            
+            
+    input_files = [fr"C:\recordings\Glendale_Static_Ohio2_0001.mp4"]        
+    
+    crossing_lines = { "left-to-right": [int(tr[0] * 0.42), 0, int(tr[0] * 0.27), tr[1] - 1], 
+                       "right-to-left": [int(tr[0] * 0.25), tr[1] - 1, int(tr[0] * 0.40), 0] }
+    for detection_threshold in [0.1, 0.2, 0.3, 0.4, 0.5]:    
+        output_file = fr"C:\Kaggle\Video\Tracking\Glendale_Static_Ohio2_8_{detection_threshold:.2f}.mp4"
+        processor.run_detection(input_files, output_file, detection_threshold=detection_threshold, box_color=box_color,
+                                detect_resolution=(1280, 720),
+                                target_resolution=tr, 
+                                crossing_lines=crossing_lines, limit_on_frames=500000000)
+        processor.post_process_video(output_file, compression=1) #, intervals=[('00:25', '03:50')      
 
-
-    '''
     input_files = [
         fr"C:\recordings\Glendale_Static_Ohio2_{i:04}.mp4" for i in range(1, 2)
     ]
